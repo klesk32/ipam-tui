@@ -8,6 +8,12 @@ I am an infrastructure engineer. This project came about as a way for me to fill
 
 *AI use disclosure:* This project made heavy use of Claude Opus in its development.
 
+## Demo
+
+[![demo](https://asciinema.org/a/zUJwcqR9D3ZKqIVa)](https://asciinema.org/a/zUJwcqR9D3ZKqIVa)
+
+*The XLSX import in this recording has been trimmed for brevity — real import time depends on dataset size.*
+
 ## Features
 
 - **Multi-User Support** — Login system with role-based access control (Admin/Editor/Viewer)
@@ -264,8 +270,7 @@ exec /opt/ipam/.venv/bin/python3 /opt/ipam/ipam-tui.py "$DB"
 - `ipam-tui.py` — Standalone terminal application
 - `ipam-web.py` — Web server wrapper (requires aiohttp)
 - `requirements.txt` — Python dependencies
-- `seed_demo.py` — Demo database seeder (used by Codespaces)
-- `example_data.xlsx` — Sample data for demo environments
+- `example_data.xlsx` — Sample data with 14 VLANs and owned subnets for demos
 - `.devcontainer/` — GitHub Codespaces configuration
 - `*.db` — SQLite database (created automatically)
 
