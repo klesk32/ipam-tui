@@ -10,7 +10,7 @@ I am an infrastructure engineer. This project came about as a way for me to fill
 
 ## Demo
 
-[![demo](https://asciinema.org/a/zUJwcqR9D3ZKqIVa)](https://asciinema.org/a/zUJwcqR9D3ZKqIVa)
+[![demo](https://asciinema.org/a/zUJwcqR9D3ZKqIVa.svg)](https://asciinema.org/a/zUJwcqR9D3ZKqIVa)
 
 *The XLSX import in this recording has been trimmed for brevity — real import time depends on dataset size.*
 
