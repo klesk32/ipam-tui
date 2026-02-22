@@ -3741,6 +3741,34 @@ def import_from_xlsx(stdscr, db: DB, filename: str, mode: str, db_name: str) -> 
     updated = 0
     errors = []
 
+    # Count total data rows for progress display
+    total_rows = 0
+    for sn in wb.sheetnames:
+        if sn.startswith("VLAN_"):
+            s = wb[sn]
+            total_rows += max(0, s.max_row - 3)
+    processed_rows = 0
+
+    def show_progress(detail: str = ""):
+        if stdscr is None:
+            return
+        try:
+            h, w = stdscr.getmaxyx()
+            pct = int(processed_rows / total_rows * 100) if total_rows > 0 else 0
+            bar_w = 20
+            filled = int(bar_w * pct / 100)
+            bar = "█" * filled + "░" * (bar_w - filled)
+            msg = f" Importing... [{bar}] {pct}%  {processed_rows}/{total_rows} rows"
+            if detail:
+                msg += f"  {detail}"
+            stdscr.erase()
+            stdscr.addnstr(h // 2, max(0, (w - len(msg)) // 2), msg[:w-1], w - 1)
+            stdscr.refresh()
+        except curses.error:
+            pass
+
+    show_progress()
+
     # Create a snapshot before import so the entire operation can be rolled back
     db.log_action("import_start", f"Import from {filename}", create_snapshot=True)
 
@@ -3841,6 +3869,7 @@ def import_from_xlsx(stdscr, db: DB, filename: str, mode: str, db_name: str) -> 
             ip_addr = sheet.cell(row_idx, ip_col).value
 
             if not subnet_name and not cidr and not ip_addr:
+                processed_rows += 1
                 continue  # Empty row
 
             subnet_name = str(subnet_name or "").strip()
@@ -3849,6 +3878,7 @@ def import_from_xlsx(stdscr, db: DB, filename: str, mode: str, db_name: str) -> 
 
             if not cidr:
                 errors.append(f"VLAN {vlan_num} row {row_idx}: Missing CIDR")
+                processed_rows += 1
                 continue
 
             # Find or create subnet
@@ -3861,6 +3891,7 @@ def import_from_xlsx(stdscr, db: DB, filename: str, mode: str, db_name: str) -> 
                     added += 1
                 except Exception as e:
                     errors.append(f"VLAN {vlan_num} row {row_idx}: Failed to create subnet - {e}")
+                    processed_rows += 1
                     continue
             else:
                 bd_id = subnet["id"]
@@ -3873,6 +3904,7 @@ def import_from_xlsx(stdscr, db: DB, filename: str, mode: str, db_name: str) -> 
                     added += 1
             except ValueError as e:
                 errors.append(f"VLAN {vlan_num} row {row_idx}: {e}")
+                processed_rows += 1
                 continue
 
             # Process IP if present
@@ -3883,6 +3915,7 @@ def import_from_xlsx(stdscr, db: DB, filename: str, mode: str, db_name: str) -> 
                     cidr_net = ipaddress.ip_network(cidr, strict=False)
                     if ip_obj not in cidr_net:
                         errors.append(f"VLAN {vlan_num} row {row_idx}: IP {ip_addr} is outside subnet range {cidr}")
+                        processed_rows += 1
                         continue
 
                     ip_id = db.ensure_ip(ip_addr)
@@ -3945,6 +3978,11 @@ def import_from_xlsx(stdscr, db: DB, filename: str, mode: str, db_name: str) -> 
                 except Exception as e:
                     errors.append(f"VLAN {vlan_num} row {row_idx} IP {ip_addr}: {e}")
 
+            processed_rows += 1
+            if processed_rows % 25 == 0 or processed_rows == total_rows:
+                show_progress(f"VLAN {vlan_num}")
+
+    show_progress("Done")
     return added, updated, errors
 
 
