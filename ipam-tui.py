@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # Config
 # =============================================================================
 
-VERSION = "0.9.0"
+VERSION = "0.9.3"
 APP_TITLE = "IPAM / VLAN Manager"
 MAX_ENUM_HOSTS = 4096  # guard rail for enumerating "unused" IPs in a subnet
 VLAN_SUBNET_KEYS = ["Customer", "Location", "Comment"]
@@ -3872,71 +3872,73 @@ def export_vlans_to_xlsx(db: DB, vlan_ids: Optional[List[int]] = None, filename:
                 except ValueError:
                     range_nets.append((cidr, None))
 
+            # Write a subnet-level row for each range (no IP = subnet-level)
+            # Attributes are written as plain values (no [Subnet:] prefix)
+            for cidr in ranges:
+                sheet.cell(row, 1, subnet["name"])
+                sheet.cell(row, 2, cidr)
+                # Column 3 (IP Address) left blank = subnet-level row
+                for col_idx, key in enumerate(all_keys, 4):
+                    val = (subnet_attrs.get(key, "") or "").strip()
+                    if val:
+                        sheet.cell(row, col_idx, val)
+                row += 1
+
+            # If subnet has no ranges, still write a row for the name
+            if not ranges:
+                sheet.cell(row, 1, subnet["name"])
+                row += 1
+
             # Get all IPs in this subnet
             ip_rows = db.list_ip_rows_in_subnet(subnet_id)
 
-            if ip_rows:
-                # Track which ranges have IPs so we can export empty ranges too
-                ranges_with_ips = set()
+            for ip_row in ip_rows:
+                ip_str = ip_row["addr"]
+                ip_id = ip_row["id"]
+                ip_attrs = db.get_attrs("ip", ip_id)
 
-                for ip_row in ip_rows:
-                    ip_str = ip_row["addr"]
-                    ip_id = ip_row["id"]
-                    ip_attrs = db.get_attrs("ip", ip_id)
+                # Find the most specific matching CIDR range for this IP
+                ip_cidr = ranges[0] if ranges else ""
+                try:
+                    ip_obj = ipaddress.ip_address(ip_str)
+                    best_prefix = -1
+                    for cidr, net in range_nets:
+                        if net and ip_obj in net and net.prefixlen > best_prefix:
+                            ip_cidr = cidr
+                            best_prefix = net.prefixlen
+                except ValueError:
+                    pass
 
-                    # Find the most specific matching CIDR range for this IP
-                    ip_cidr = ranges[0] if ranges else ""
-                    try:
-                        ip_obj = ipaddress.ip_address(ip_str)
-                        best_prefix = -1
-                        for cidr, net in range_nets:
-                            if net and ip_obj in net and net.prefixlen > best_prefix:
-                                ip_cidr = cidr
-                                best_prefix = net.prefixlen
-                    except ValueError:
-                        pass
-                    ranges_with_ips.add(ip_cidr)
+                sheet.cell(row, 1, subnet["name"])
+                sheet.cell(row, 2, ip_cidr)
+                sheet.cell(row, 3, ip_str)
 
-                    sheet.cell(row, 1, subnet["name"])
-                    sheet.cell(row, 2, ip_cidr)
-                    sheet.cell(row, 3, ip_str)
+                # Only write IP attributes if they're non-empty (not inherited)
+                for col_idx, key in enumerate(all_keys, 4):
+                    val = ip_attrs.get(key, "").strip()
+                    if val:  # Only write non-empty values
+                        sheet.cell(row, col_idx, val)
 
-                    # Only write IP attributes if they're non-empty (not inherited)
-                    for col_idx, key in enumerate(all_keys, 4):
-                        val = ip_attrs.get(key, "").strip()
-                        if val:  # Only write non-empty values
-                            sheet.cell(row, col_idx, val)
-
-                    row += 1
-
-                # Export any ranges that had no IPs in them
-                for cidr in ranges:
-                    if cidr not in ranges_with_ips:
-                        sheet.cell(row, 1, subnet["name"])
-                        sheet.cell(row, 2, cidr)
-                        for col_idx, key in enumerate(all_keys, 4):
-                            val = subnet_attrs.get(key, "").strip()
-                            if val:
-                                sheet.cell(row, col_idx, f"[Subnet: {val}]")
-                        row += 1
-            else:
-                # Empty subnet — write a row for each range
-                if ranges:
-                    for cidr in ranges:
-                        sheet.cell(row, 1, subnet["name"])
-                        sheet.cell(row, 2, cidr)
-                        for col_idx, key in enumerate(all_keys, 4):
-                            val = subnet_attrs.get(key, "").strip()
-                            if val:
-                                sheet.cell(row, col_idx, f"[Subnet: {val}]")
-                        row += 1
-                else:
-                    sheet.cell(row, 1, subnet["name"])
-                    row += 1
+                row += 1
 
         # Auto-size columns using get_column_letter for proper column names (A, B, ..., Z, AA, AB, etc.)
         for col_idx in range(1, len(headers) + 1):
             sheet.column_dimensions[get_column_letter(col_idx)].width = 15
+
+    # --- Owned Subnets sheet (only in full exports) ---
+    owned = db.list_owned_subnets()
+    if owned and vlan_ids is None:
+        os_sheet = wb.create_sheet("Owned_Subnets")
+        os_headers = ["CIDR", "Label"]
+        for col_idx, header in enumerate(os_headers, 1):
+            cell = os_sheet.cell(1, col_idx, header)
+            cell.font = Font(bold=True)
+            cell.fill = PatternFill(start_color="CCCCCC", end_color="CCCCCC", fill_type="solid")
+        for i, o in enumerate(owned):
+            os_sheet.cell(i + 2, 1, o["cidr"])
+            os_sheet.cell(i + 2, 2, o["label"] or "")
+        os_sheet.column_dimensions["A"].width = 22
+        os_sheet.column_dimensions["B"].width = 40
 
     wb.save(filename)
     return filename
@@ -3991,7 +3993,8 @@ def import_from_xlsx(stdscr, db: DB, filename: str, mode: str, db_name: str) -> 
 
         # Parse VLAN info from sheet name
         if not sheet_name.startswith("VLAN_"):
-            errors.append(f"Skipping sheet '{sheet_name}' - doesn't start with VLAN_")
+            if sheet_name != "Owned_Subnets":
+                errors.append(f"Skipping sheet '{sheet_name}' - doesn't start with VLAN_")
             continue
 
         parts = sheet_name.split("_", 2)
@@ -4121,7 +4124,7 @@ def import_from_xlsx(stdscr, db: DB, filename: str, mode: str, db_name: str) -> 
                 processed_rows += 1
                 continue
 
-            # Process IP if present
+            # Process IP if present, otherwise treat as subnet-level attribute row
             if ip_addr:
                 try:
                     # Validate IP is within the subnet CIDR range
@@ -4144,8 +4147,11 @@ def import_from_xlsx(stdscr, db: DB, filename: str, mode: str, db_name: str) -> 
                     import_keys = set()
                     for col_idx, attr_key in attr_cols:
                         val = sheet.cell(row_idx, col_idx).value
-                        if val and not str(val).startswith("[Subnet:"):  # Skip subnet-level markers
+                        if val:
                             val_str = str(val).strip()
+                            # Backwards compat: skip old [Subnet: ...] markers on IP rows
+                            if val_str.startswith("[Subnet:"):
+                                continue
                             import_keys.add(attr_key)
 
                             if mode in ("overwrite", "prefer_import"):
@@ -4192,9 +4198,82 @@ def import_from_xlsx(stdscr, db: DB, filename: str, mode: str, db_name: str) -> 
                 except Exception as e:
                     errors.append(f"VLAN {vlan_num} row {row_idx} IP {ip_addr}: {e}")
 
+            else:
+                # No IP address = subnet-level attribute row
+                for col_idx, attr_key in attr_cols:
+                    val = sheet.cell(row_idx, col_idx).value
+                    if val:
+                        val_str = str(val).strip()
+                        # Backwards compat: strip old [Subnet: ...] wrapper
+                        if val_str.startswith("[Subnet:") and val_str.endswith("]"):
+                            val_str = val_str[len("[Subnet:"):].rstrip("]").strip()
+                        if not val_str:
+                            continue
+
+                        if mode in ("overwrite", "prefer_import"):
+                            db.upsert_attr("bd", bd_id, attr_key, val_str, 1)
+                            updated += 1
+                        elif mode == "prefer_db":
+                            existing = db.get_attrs("bd", bd_id)
+                            if attr_key not in existing or not existing[attr_key]:
+                                db.upsert_attr("bd", bd_id, attr_key, val_str, 1)
+                                updated += 1
+                        elif mode == "interactive":
+                            existing = db.get_attrs("bd", bd_id)
+                            if attr_key in existing and existing[attr_key] and existing[attr_key] != val_str:
+                                choice = dialog_yes_no(
+                                    stdscr,
+                                    "Import conflict",
+                                    "Subnet attribute conflict",
+                                    [
+                                        f"Subnet: {subnet_name}",
+                                        f"Key: {attr_key}",
+                                        f"DB value: {existing[attr_key]}",
+                                        f"Import value: {val_str}",
+                                        "",
+                                        "Use imported value?"
+                                    ],
+                                    default_yes=False,
+                                    db_name=db_name
+                                )
+                                if choice:
+                                    db.upsert_attr("bd", bd_id, attr_key, val_str, 1)
+                                    updated += 1
+                            else:
+                                db.upsert_attr("bd", bd_id, attr_key, val_str, 1)
+                                updated += 1
+
             processed_rows += 1
             if processed_rows % 25 == 0 or processed_rows == total_rows:
                 show_progress(f"VLAN {vlan_num}")
+
+    # --- Import Owned Subnets sheet ---
+    if "Owned_Subnets" in wb.sheetnames:
+        os_sheet = wb["Owned_Subnets"]
+        for row_idx in range(2, os_sheet.max_row + 1):
+            os_cidr = os_sheet.cell(row_idx, 1).value
+            os_label = os_sheet.cell(row_idx, 2).value or ""
+            if not os_cidr:
+                continue
+            os_cidr = str(os_cidr).strip()
+            os_label = str(os_label).strip()
+            try:
+                # Check if this exact CIDR already exists
+                existing_owned = db.list_owned_subnets()
+                already_exists = any(o["cidr"] == str(ipaddress.ip_network(os_cidr, strict=False)) for o in existing_owned)
+                if not already_exists:
+                    db.create_owned_subnet(os_cidr, os_label)
+                    added += 1
+                else:
+                    # Update label if different
+                    for o in existing_owned:
+                        if o["cidr"] == str(ipaddress.ip_network(os_cidr, strict=False)):
+                            if o["label"] != os_label:
+                                db.update_owned_subnet_label(o["id"], os_label)
+                                updated += 1
+                            break
+            except (ValueError, Exception) as e:
+                errors.append(f"Owned subnet {os_cidr}: {e}")
 
     show_progress("Done")
     return added, updated, errors
