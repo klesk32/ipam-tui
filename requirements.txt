@@ -1,0 +1,8 @@
+# Excel import/export support
+openpyxl>=3.0.0
+
+# Required for Windows
+windows-curses>=2.3.0; platform_system=="Windows"
+
+# Required for web server (ipam-web.py)
+aiohttp>=3.8.0
