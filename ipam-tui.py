@@ -963,7 +963,11 @@ class DB:
             return False, "Username may only contain letters, numbers, dots, hyphens, and underscores"
         return True, ""
 
-    PASSWORD_HINT = "Min 16 chars with uppercase, lowercase, number & special char. Passphrases like 'Tango4$emotional$BAGPIPES' work great!"
+    PASSWORD_REQUIREMENTS = [
+        "Min 16 characters",
+        "Uppercase + lowercase",
+        "Number + special char",
+    ]
 
     # Blocked example passphrases (lowercase for comparison)
     BLOCKED_PASSPHRASES = [
@@ -1427,7 +1431,7 @@ def edit_line_dialog(
 
 
 def password_dialog(
-    stdscr, title: str, label: str, maxlen: int = 100, hint: str = ""
+    stdscr, title: str, label: str, maxlen: int = 100, hint: Optional[List[str]] = None
 ) -> Optional[str]:
     """Password input dialog - shows asterisks instead of characters."""
     # Initialize basic colors for login screen
@@ -1446,21 +1450,23 @@ def password_dialog(
     stdscr.clear()
     stdscr.bkgd(" ", cp(CP_NORMAL))
 
-    # Calculate dialog size - make it wider if there's a hint
-    min_width = max(44, len(label) + 16)
-    if hint:
-        min_width = max(min_width, len(hint) + 6)
-    width = min(90, min_width)
-    height = 12 if hint else 10
+    hint_lines = hint if hint else []
+    width = max(44, len(label) + 16)
+    for line in hint_lines:
+        width = max(width, len(line) + 6)
+    width = min(90, width)
+    height = 10 + len(hint_lines)
 
     y, x, h, w = center_rect(stdscr, height, width)
     win = stdscr.derwin(h, w, y, x)
     framed(win, title)
     win.addnstr(2, 2, label, w - 4)
 
-    # Show hint if provided
-    if hint:
-        win.addnstr(h - 4, 2, hint[:w-4], w - 4, cp(CP_DIM) | curses.A_DIM)
+    # Show hint lines at bottom of dialog
+    for i, line in enumerate(hint_lines):
+        row = h - 3 - len(hint_lines) + i
+        if 0 < row < h - 1:
+            win.addnstr(row, 2, line[:w-4], w - 4, cp(CP_DIM) | curses.A_DIM)
 
     buf = []
     input_row = 4
@@ -2426,7 +2432,7 @@ def workflow_change_password(stdscr, db: DB, user: User, db_name: str):
         return
 
     # Get new password with hint
-    new_pw = password_dialog(stdscr, "Change Password", "New password:", hint=db.PASSWORD_HINT)
+    new_pw = password_dialog(stdscr, "Change Password", "New password:", hint=db.PASSWORD_REQUIREMENTS)
     if new_pw is None or not new_pw:
         return
 
@@ -2502,7 +2508,7 @@ def workflow_add_user(stdscr, db: DB, db_name: str):
         return
 
     # Get password with hint
-    password = password_dialog(stdscr, "Add User", "Password:", hint=db.PASSWORD_HINT)
+    password = password_dialog(stdscr, "Add User", "Password:", hint=db.PASSWORD_REQUIREMENTS)
     if password is None or not password:
         dialog_message(stdscr, bc, "Error", ["Password is required."], db_name=db_name)
         return
@@ -2582,7 +2588,7 @@ def workflow_edit_user(stdscr, db: DB, target_user: User, db_name: str):
 
         elif idx == 1:
             # Reset password
-            new_pw = password_dialog(stdscr, "Reset Password", "New password:", hint=db.PASSWORD_HINT)
+            new_pw = password_dialog(stdscr, "Reset Password", "New password:", hint=db.PASSWORD_REQUIREMENTS)
             if new_pw and new_pw.strip():
                 # Validate new password
                 valid, error = db.validate_password(new_pw)
