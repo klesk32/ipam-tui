@@ -128,6 +128,13 @@ CREATE TABLE IF NOT EXISTS snapshots (
   db_state BLOB NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS owned_subnets (
+  id INTEGER PRIMARY KEY,
+  cidr TEXT NOT NULL UNIQUE,
+  label TEXT DEFAULT '',
+  created TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp DESC);
 """
 
@@ -207,6 +214,19 @@ class DB:
             self.q("SELECT logged_by FROM audit_log LIMIT 1")
         except sqlite3.OperationalError:
             self.x("ALTER TABLE audit_log ADD COLUMN logged_by TEXT")
+
+        # Migration: add owned_subnets table if it doesn't exist
+        try:
+            self.q("SELECT 1 FROM owned_subnets LIMIT 1")
+        except sqlite3.OperationalError:
+            self.con.executescript("""
+                CREATE TABLE IF NOT EXISTS owned_subnets (
+                  id INTEGER PRIMARY KEY,
+                  cidr TEXT NOT NULL UNIQUE,
+                  label TEXT DEFAULT '',
+                  created TEXT NOT NULL
+                );
+            """)
 
         self.con.commit()
 
@@ -463,6 +483,12 @@ class DB:
               timestamp TEXT NOT NULL,
               db_state BLOB NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS owned_subnets (
+              id INTEGER PRIMARY KEY,
+              cidr TEXT NOT NULL UNIQUE,
+              label TEXT DEFAULT '',
+              created TEXT NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp DESC);
         """)
 
@@ -565,21 +591,22 @@ class DB:
 
         return subnet_count, ip_count
 
-    def check_routed_vlan_overlap(self, vlan_id: int, new_cidr: str) -> Optional[Tuple[int, str]]:
-        """Check if new_cidr overlaps with subnets in other routed VLANs.
+    def check_routed_vlan_overlap(self, bd_id: int, new_cidr: str) -> Optional[Tuple[int, str]]:
+        """Check if new_cidr overlaps with ranges in any routed VLAN subnet (excluding the given subnet).
+        This catches overlaps both within the same routed VLAN and across different routed VLANs.
         Returns (vlan_num, existing_cidr) if overlap found, None otherwise."""
         new_net = ipaddress.ip_network(new_cidr, strict=False)
 
-        # Get all subnet ranges from other routed VLANs
+        # Get all subnet ranges from all routed VLANs, excluding only the current subnet
         rows = self.q(
             """
             SELECT v.vlan_num, br.cidr
             FROM bd_ranges br
             JOIN broadcast_domains bd ON bd.id = br.bd_id
             JOIN vlans v ON v.id = bd.vlan_id
-            WHERE v.routed = 1 AND v.id != ?
+            WHERE v.routed = 1 AND br.bd_id != ?
             """,
-            (vlan_id,)
+            (bd_id,)
         )
 
         for r in rows:
@@ -594,17 +621,35 @@ class DB:
 
     def check_vlan_can_be_routed(self, vlan_id: int) -> Optional[Tuple[str, int, str]]:
         """Check if a VLAN's subnets would conflict if marked as routed.
+        Checks both intra-VLAN overlaps (different subnets in this VLAN) and
+        inter-VLAN overlaps (against other routed VLANs).
         Returns (this_cidr, other_vlan_num, other_cidr) if conflict found, None otherwise."""
-        # Get all subnets in this VLAN
+        # Get all ranges in this VLAN with their subnet IDs
         my_ranges = self.q(
             """
-            SELECT br.cidr
+            SELECT br.cidr, bd.id AS bd_id
             FROM bd_ranges br
             JOIN broadcast_domains bd ON bd.id = br.bd_id
             WHERE bd.vlan_id = ?
             """,
             (vlan_id,)
         )
+
+        vlan = self.get_vlan_by_id(vlan_id)
+        vlan_num = vlan["vlan_num"] if vlan else 0
+
+        # Check for intra-VLAN overlaps (ranges in different subnets within this VLAN)
+        for i, r1 in enumerate(my_ranges):
+            for r2 in my_ranges[i + 1:]:
+                if r1["bd_id"] == r2["bd_id"]:
+                    continue  # Same subnet — intra-subnet overlaps already prevented
+                try:
+                    n1 = ipaddress.ip_network(r1["cidr"], strict=False)
+                    n2 = ipaddress.ip_network(r2["cidr"], strict=False)
+                    if n1.overlaps(n2):
+                        return (r1["cidr"], vlan_num, r2["cidr"])
+                except ValueError:
+                    continue
 
         # Check each against other routed VLANs
         for my_r in my_ranges:
@@ -696,7 +741,7 @@ class DB:
         if subnet:
             vlan = self.get_vlan_by_id(subnet["vlan_id"])
             if vlan and vlan["routed"]:
-                overlap = self.check_routed_vlan_overlap(subnet["vlan_id"], normalized_cidr)
+                overlap = self.check_routed_vlan_overlap(bd_id, normalized_cidr)
                 if overlap:
                     raise ValueError(f"Subnet overlaps with VLAN {overlap[0]} subnet {overlap[1]} (both VLANs are routed)")
 
@@ -1097,6 +1142,175 @@ class DB:
         """Count the number of admin users."""
         rows = self.q("SELECT COUNT(*) as cnt FROM users WHERE role=?", (ROLE_ADMIN,))
         return rows[0]["cnt"]
+
+    # ---- Owned Subnets ----
+
+    def list_owned_subnets(self) -> List[sqlite3.Row]:
+        return self.q("SELECT * FROM owned_subnets ORDER BY cidr")
+
+    def get_owned_subnet(self, owned_id: int) -> Optional[sqlite3.Row]:
+        rows = self.q("SELECT * FROM owned_subnets WHERE id=?", (owned_id,))
+        return rows[0] if rows else None
+
+    def create_owned_subnet(self, cidr: str, label: str) -> int:
+        """Add an owned subnet. Validates non-RFC1918 and no overlaps with existing owned subnets."""
+        net = ipaddress.ip_network(cidr, strict=False)
+        normalized = str(net)
+
+        if is_rfc1918(normalized):
+            raise ValueError("RFC 1918 (private) address space cannot be added as an owned subnet")
+
+        # Check for overlaps with existing owned subnets
+        existing = self.list_owned_subnets()
+        for row in existing:
+            try:
+                existing_net = ipaddress.ip_network(row["cidr"], strict=False)
+                if net.overlaps(existing_net):
+                    raise ValueError(f"Overlaps with existing owned subnet {row['cidr']}")
+            except ValueError as e:
+                if "Overlaps" in str(e) or "RFC 1918" in str(e):
+                    raise
+                continue
+
+        created = datetime.now().isoformat()
+        owned_id = self.x(
+            "INSERT INTO owned_subnets(cidr, label, created) VALUES(?,?,?)",
+            (normalized, label.strip(), created)
+        )
+        self.log_action("create_owned_subnet", f"Added owned subnet {normalized} '{label.strip()}'", create_snapshot=True)
+        return owned_id
+
+    def delete_owned_subnet(self, owned_id: int):
+        """Remove an owned subnet tracking entry. Does not affect VLANs or bd_ranges."""
+        owned = self.get_owned_subnet(owned_id)
+        cidr = owned["cidr"] if owned else "?"
+        label = owned["label"] if owned else ""
+        self.log_action("delete_owned_subnet", f"Removed owned subnet {cidr} '{label}'", create_snapshot=True)
+        self.x("DELETE FROM owned_subnets WHERE id=?", (owned_id,))
+
+    def update_owned_subnet_label(self, owned_id: int, label: str):
+        self.x("UPDATE owned_subnets SET label=? WHERE id=?", (label.strip(), owned_id))
+        owned = self.get_owned_subnet(owned_id)
+        cidr = owned["cidr"] if owned else "?"
+        self.log_action("update_owned_subnet", f"Renamed owned subnet {cidr} to '{label.strip()}'")
+
+    def get_all_owned_utilization(self) -> Dict[int, Tuple[int, int]]:
+        """Get (allocated_addrs, total_addrs) for all owned subnets efficiently."""
+        owned = self.list_owned_subnets()
+        if not owned:
+            return {}
+
+        # Fetch all routed bd_ranges once
+        all_routed = self.q("""
+            SELECT br.cidr
+            FROM bd_ranges br
+            JOIN broadcast_domains bd ON bd.id = br.bd_id
+            JOIN vlans v ON v.id = bd.vlan_id
+            WHERE v.routed = 1
+        """)
+
+        routed_nets = []
+        for r in all_routed:
+            try:
+                routed_nets.append(ipaddress.ip_network(r["cidr"], strict=False))
+            except ValueError:
+                continue
+
+        result = {}
+        for o in owned:
+            owned_net = ipaddress.ip_network(o["cidr"], strict=False)
+            total = owned_net.num_addresses
+            allocated = sum(rn.num_addresses for rn in routed_nets if rn.subnet_of(owned_net))
+            result[o["id"]] = (allocated, total)
+
+        return result
+
+    def get_owned_subnet_allocations(self, owned_id: int) -> Optional[Dict[str, Any]]:
+        """Get detailed allocation info for a single owned subnet."""
+        owned = self.get_owned_subnet(owned_id)
+        if not owned:
+            return None
+
+        owned_net = ipaddress.ip_network(owned["cidr"], strict=False)
+
+        all_routed = self.q("""
+            SELECT br.cidr, bd.name as subnet_name, bd.id as bd_id,
+                   v.vlan_num, v.name as vlan_name, v.id as vlan_id
+            FROM bd_ranges br
+            JOIN broadcast_domains bd ON bd.id = br.bd_id
+            JOIN vlans v ON v.id = bd.vlan_id
+            WHERE v.routed = 1
+        """)
+
+        allocated = []
+        allocated_addrs = 0
+        for r in all_routed:
+            try:
+                range_net = ipaddress.ip_network(r["cidr"], strict=False)
+                if range_net.subnet_of(owned_net):
+                    allocated.append({
+                        "cidr": r["cidr"],
+                        "subnet_name": r["subnet_name"],
+                        "bd_id": r["bd_id"],
+                        "vlan_num": r["vlan_num"],
+                        "vlan_name": r["vlan_name"],
+                        "vlan_id": r["vlan_id"],
+                        "addrs": range_net.num_addresses,
+                    })
+                    allocated_addrs += range_net.num_addresses
+            except ValueError:
+                continue
+
+        allocated.sort(key=lambda a: ipaddress.ip_network(a["cidr"], strict=False).network_address)
+
+        # Compute unallocated blocks
+        allocated_nets = [ipaddress.ip_network(a["cidr"], strict=False) for a in allocated]
+        unallocated = compute_unallocated(owned_net, allocated_nets)
+        unallocated_addrs = sum(n.num_addresses for n in unallocated)
+
+        return {
+            "cidr": owned["cidr"],
+            "label": owned["label"],
+            "total_addrs": owned_net.num_addresses,
+            "allocated_addrs": allocated_addrs,
+            "unallocated_addrs": unallocated_addrs,
+            "allocated": allocated,
+            "unallocated": unallocated,
+        }
+
+
+# =============================================================================
+# Owned Subnets helpers
+# =============================================================================
+
+RFC1918_NETWORKS = [
+    ipaddress.ip_network('10.0.0.0/8'),
+    ipaddress.ip_network('172.16.0.0/12'),
+    ipaddress.ip_network('192.168.0.0/16'),
+]
+
+
+def is_rfc1918(cidr: str) -> bool:
+    """Check if a CIDR overlaps with any RFC 1918 private address range."""
+    net = ipaddress.ip_network(cidr, strict=False)
+    return any(net.overlaps(p) for p in RFC1918_NETWORKS)
+
+
+def compute_unallocated(owned_net, allocated_nets: list) -> list:
+    """Compute the network blocks within owned_net that are not covered by allocated_nets."""
+    remaining = [owned_net]
+    for alloc in sorted(allocated_nets, key=lambda n: (n.network_address, n.prefixlen)):
+        new_remaining = []
+        for r in remaining:
+            if r.overlaps(alloc):
+                try:
+                    new_remaining.extend(r.address_exclude(alloc))
+                except ValueError:
+                    pass  # alloc larger than r — nothing remains
+            else:
+                new_remaining.append(r)
+        remaining = new_remaining
+    return sorted(remaining, key=lambda n: n.network_address)
 
 
 # =============================================================================
@@ -4261,6 +4475,317 @@ def workflow_audit_log(stdscr, db: DB, db_name: str):
 # =============================================================================
 
 
+# =============================================================================
+# Owned Subnets
+# =============================================================================
+
+
+def workflow_owned_subnets(stdscr, db: DB, db_name: str):
+    bc = "Main > Owned Subnets"
+    sel = 0
+    top = 0
+
+    while True:
+        owned = db.list_owned_subnets()
+        utilization = db.get_all_owned_utilization()
+
+        rows = []
+        for o in owned:
+            alloc, total = utilization.get(o["id"], (0, 0))
+            pct = (alloc / total * 100) if total > 0 else 0
+            label_part = f" {o['label']}" if o["label"] else ""
+            rows.append(ListRow(
+                label=f"{o['cidr']}{label_part}",
+                customer=f"{alloc}/{total} ({pct:.1f}%)",
+                location="",
+            ))
+
+        user = db.current_user
+        if user and user.can_edit():
+            footer = "Enter: detail n: add e: rename d: delete q: back Esc: main menu"
+        else:
+            footer = "Enter: detail q: back Esc: main menu"
+
+        draw_chrome(stdscr, bc, footer, db_name=db_name)
+        bw = body_win(stdscr)
+
+        if not rows:
+            framed(bw, "Owned Subnets")
+            h, w = bw.getmaxyx()
+            bw.addnstr(2, 2, "No owned subnets.", w - 4, cp(CP_DIM) | curses.A_DIM)
+            if user and user.can_edit():
+                bw.addnstr(3, 2, "Press 'n' to add one.", w - 4, cp(CP_DIM))
+            bw.refresh()
+
+            c = stdscr.getch()
+            if c == 27:
+                raise GoHome()
+            if c in (ord("q"), ord("Q")):
+                return
+            if c in (ord("n"), ord("N")):
+                _owned_subnet_add(stdscr, db, bc, db_name)
+            continue
+
+        sel = max(0, min(sel, len(rows) - 1))
+
+        h, w = bw.getmaxyx()
+        view_h = (h - 4) - 1
+        if view_h < 1:
+            view_h = 1
+        if sel < top:
+            top = sel
+        if sel >= top + view_h:
+            top = sel - view_h + 1
+
+        render_list_rows(bw, "Owned Subnets", rows, sel, top)
+        bw.refresh()
+
+        c = stdscr.getch()
+        if c == 27:
+            raise GoHome()
+        if c in (ord("q"), ord("Q")):
+            return
+
+        if c in (curses.KEY_UP, ord("k")):
+            sel = max(0, sel - 1)
+        elif c in (curses.KEY_DOWN, ord("j")):
+            sel = min(len(rows) - 1, sel + 1)
+        elif c == curses.KEY_PPAGE:
+            sel = max(0, sel - view_h)
+        elif c == curses.KEY_NPAGE:
+            sel = min(len(rows) - 1, sel + view_h)
+        elif c == curses.KEY_HOME:
+            sel = 0
+        elif c == curses.KEY_END:
+            sel = max(0, len(rows) - 1)
+        elif c in (ord("\n"), ord("\r"), curses.KEY_ENTER):
+            screen_owned_subnet_detail(stdscr, db, owned[sel]["id"], db_name=db_name)
+        elif c in (ord("n"), ord("N")):
+            _owned_subnet_add(stdscr, db, bc, db_name)
+        elif c in (ord("e"), ord("E")):
+            _owned_subnet_rename(stdscr, db, owned[sel]["id"], bc, db_name)
+        elif c in (ord("d"), ord("D")):
+            if _owned_subnet_delete(stdscr, db, owned[sel]["id"], bc, db_name):
+                sel = max(0, sel - 1)
+                top = 0
+
+
+def _owned_subnet_add(stdscr, db: DB, bc: str, db_name: str):
+    """Add a new owned subnet."""
+    if not require_edit(stdscr, db, bc):
+        return
+
+    cidr = edit_line_dialog(stdscr, bc, "Add Owned Subnet", "CIDR (e.g. 198.51.100.0/24):", "", db_name=db_name)
+    if cidr is None or cidr.strip() == "":
+        return
+
+    # Validate CIDR
+    try:
+        ipaddress.ip_network(cidr.strip(), strict=False)
+    except ValueError as e:
+        dialog_message(stdscr, bc, "Invalid CIDR", [str(e)], db_name=db_name)
+        return
+
+    label = edit_line_dialog(stdscr, bc, "Add Owned Subnet", "Label (optional):", "", db_name=db_name)
+    if label is None:
+        return
+
+    try:
+        db.create_owned_subnet(cidr.strip(), label)
+    except (ValueError, sqlite3.IntegrityError) as e:
+        dialog_message(stdscr, bc, "Error", [str(e)], db_name=db_name)
+
+
+def screen_owned_subnet_detail(stdscr, db: DB, owned_id: int, db_name: str = ""):
+    owned = db.get_owned_subnet(owned_id)
+    if not owned:
+        return
+
+    bc = f"Owned Subnets > {owned['cidr']}"
+    sel = 0
+    top = 0
+
+    while True:
+        info = db.get_owned_subnet_allocations(owned_id)
+        if not info:
+            return
+
+        user = db.current_user
+        if user and user.can_edit():
+            footer = "Enter: open subnet e: rename d: delete q: back Esc: main menu"
+        else:
+            footer = "Enter: open subnet q: back Esc: main menu"
+
+        draw_chrome(stdscr, bc, footer, db_name=db_name)
+
+        bw = body_win(stdscr)
+        H, W = bw.getmaxyx()
+        bw.erase()
+
+        left_w = max(40, int(W * 0.40))
+        right_w = W - left_w
+
+        left = bw.derwin(H, left_w, 0, 0)
+        right = bw.derwin(H, right_w, 0, left_w)
+
+        framed(left, "Owned Subnet")
+        inner_w = left_w - 4
+
+        total = info["total_addrs"]
+        alloc = info["allocated_addrs"]
+        avail = info["unallocated_addrs"]
+        pct_alloc = (alloc / total * 100) if total > 0 else 0
+        pct_avail = (avail / total * 100) if total > 0 else 0
+
+        y = 2
+        left.addnstr(y, 2, f"CIDR: {info['cidr']}", inner_w, cp(CP_NORMAL) | curses.A_BOLD); y += 1
+        if info["label"]:
+            left.addnstr(y, 2, f"Label: {info['label']}", inner_w); y += 1
+        y += 1
+        left.addnstr(y, 2, f"Total: {total} addresses", inner_w); y += 1
+        left.addnstr(y, 2, f"Allocated: {alloc} ({pct_alloc:.1f}%)", inner_w); y += 1
+        left.addnstr(y, 2, f"Available: {avail} ({pct_avail:.1f}%)", inner_w); y += 1
+
+        # Draw utilization bar
+        y += 1
+        bar_w = min(inner_w - 2, 40)
+        if bar_w > 4 and total > 0:
+            filled = max(0, int(bar_w * alloc / total))
+            bar = "\u2588" * filled + "\u2591" * (bar_w - filled)
+            left.addnstr(y, 2, bar, inner_w, cp(CP_NORMAL)); y += 1
+
+        # Unallocated blocks
+        y += 1
+        unalloc = info["unallocated"]
+        if unalloc:
+            left.addnstr(y, 2, "Available blocks:", inner_w, cp(CP_DIM) | curses.A_BOLD); y += 1
+            for blk in unalloc[:max(0, H - y - 2)]:
+                left.addnstr(y, 4, str(blk), inner_w - 2); y += 1
+        else:
+            left.addnstr(y, 2, "Fully allocated", inner_w, cp(CP_DIM)); y += 1
+
+        left.refresh()
+
+        # Right panel: allocated ranges
+        alloc_list = info["allocated"]
+
+        # Batch load Customer/Location for allocated subnets
+        if alloc_list:
+            bd_ids = [a["bd_id"] for a in alloc_list]
+            aggregates = db.batch_aggregate_for_subnets(bd_ids)
+        else:
+            aggregates = {}
+
+        alloc_rows = []
+        for a in alloc_list:
+            sc, sl = aggregates.get(a["bd_id"], ("", ""))
+            alloc_rows.append(ListRow(
+                label=f"VLAN {a['vlan_num']} {a['subnet_name']} {a['cidr']}",
+                customer=sc,
+                location=sl,
+            ))
+
+        if not alloc_rows:
+            framed(right, "Allocations")
+            right.addnstr(2, 2, "No routed subnets allocated.", right_w - 4, cp(CP_DIM) | curses.A_DIM)
+            right.refresh()
+            bw.refresh()
+
+            c = stdscr.getch()
+            if c == 27:
+                raise GoHome()
+            if c in (ord("q"), ord("Q")):
+                return
+            if c in (ord("e"), ord("E")):
+                _owned_subnet_rename(stdscr, db, owned_id, bc, db_name)
+                owned = db.get_owned_subnet(owned_id)
+                if owned:
+                    bc = f"Owned Subnets > {owned['cidr']}"
+            elif c in (ord("d"), ord("D")):
+                if _owned_subnet_delete(stdscr, db, owned_id, bc, db_name):
+                    return
+            continue
+
+        sel = max(0, min(sel, len(alloc_rows) - 1))
+
+        # Scrolling
+        H_right, _ = right.getmaxyx()
+        view_h = (H_right - 4) - 1
+        if view_h < 1:
+            view_h = 1
+        if sel < top:
+            top = sel
+        if sel >= top + view_h:
+            top = sel - view_h + 1
+
+        render_list_rows(right, "Allocations", alloc_rows, sel, top)
+        right.refresh()
+        bw.refresh()
+
+        c = stdscr.getch()
+        if c == 27:
+            raise GoHome()
+        if c in (ord("q"), ord("Q")):
+            return
+
+        if c in (curses.KEY_UP, ord("k")):
+            sel = max(0, sel - 1)
+        elif c in (curses.KEY_DOWN, ord("j")):
+            sel = min(len(alloc_rows) - 1, sel + 1)
+        elif c == curses.KEY_PPAGE:
+            sel = max(0, sel - view_h)
+        elif c == curses.KEY_NPAGE:
+            sel = min(len(alloc_rows) - 1, sel + view_h)
+        elif c in (ord("\n"), ord("\r"), curses.KEY_ENTER):
+            # Open the selected subnet
+            bd_id = alloc_list[sel]["bd_id"]
+            screen_subnet_menu(stdscr, db, bd_id, db_name=db_name)
+        elif c in (ord("e"), ord("E")):
+            _owned_subnet_rename(stdscr, db, owned_id, bc, db_name)
+            owned = db.get_owned_subnet(owned_id)
+            if owned:
+                bc = f"Owned Subnets > {owned['cidr']}"
+        elif c in (ord("d"), ord("D")):
+            if _owned_subnet_delete(stdscr, db, owned_id, bc, db_name):
+                return
+
+
+def _owned_subnet_rename(stdscr, db: DB, owned_id: int, bc: str, db_name: str):
+    if not require_edit(stdscr, db, bc):
+        return
+    owned = db.get_owned_subnet(owned_id)
+    if not owned:
+        return
+    label = edit_line_dialog(stdscr, bc, "Rename", "Label:", owned["label"], db_name=db_name)
+    if label is not None:
+        db.update_owned_subnet_label(owned_id, label)
+
+
+def _owned_subnet_delete(stdscr, db: DB, owned_id: int, bc: str, db_name: str) -> bool:
+    """Delete an owned subnet. Returns True if deleted."""
+    if not require_edit(stdscr, db, bc, "delete"):
+        return False
+    owned = db.get_owned_subnet(owned_id)
+    if not owned:
+        return False
+
+    confirm = dialog_yes_no(
+        stdscr, bc, "Remove Owned Subnet",
+        [
+            f"Remove {owned['cidr']} from owned subnets?",
+            "",
+            "This only removes the tracking entry.",
+            "VLANs and subnets are not affected.",
+        ],
+        default_yes=False,
+        db_name=db_name,
+    )
+    if confirm:
+        db.delete_owned_subnet(owned_id)
+        return True
+    return False
+
+
 def mainmenu(stdscr, db: DB, user: User):
     sel = 0
     db_name = db.db_name
@@ -4275,6 +4800,7 @@ def mainmenu(stdscr, db: DB, user: User):
             menu = [
                 ("Search", lambda: workflow_search(stdscr, db, db_name=db_name)),
                 ("List", lambda: workflow_list(stdscr, db, db_name=db_name)),
+                ("Owned Subnets", lambda: workflow_owned_subnets(stdscr, db, db_name=db_name)),
                 ("Export All VLANs", lambda: workflow_export_all(stdscr, db, db_name=db_name)),
                 ("Audit Log", lambda: workflow_audit_log(stdscr, db, db_name=db_name)),
                 ("Configure", lambda: workflow_configure(stdscr, db, user, db_name=db_name)),
@@ -4287,6 +4813,7 @@ def mainmenu(stdscr, db: DB, user: User):
                 ("Create Subnet", lambda: workflow_create_subnet(stdscr, db, db_name=db_name)),
                 ("Search", lambda: workflow_search(stdscr, db, db_name=db_name)),
                 ("List", lambda: workflow_list(stdscr, db, db_name=db_name)),
+                ("Owned Subnets", lambda: workflow_owned_subnets(stdscr, db, db_name=db_name)),
                 ("Export All VLANs", lambda: workflow_export_all(stdscr, db, db_name=db_name)),
                 ("Import from XLSX", lambda: workflow_import(stdscr, db, db_name=db_name)),
                 ("Audit Log", lambda: workflow_audit_log(stdscr, db, db_name=db_name)),

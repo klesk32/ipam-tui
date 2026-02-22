@@ -13,6 +13,7 @@ I am an infrastructure engineer. This project came about as a way for me to fill
 - **Multi-User Support** — Login system with role-based access control (Admin/Editor/Viewer)
 - **VLAN Management** — Create, edit, delete VLANs with routed/unrouted designation
 - **Subnet Management** — Organize subnets within VLANs, multiple CIDR ranges per subnet
+- **Owned Subnets** — Track purchased public IP blocks and their utilization across routed VLANs
 - **IP Address Tracking** — View in-use and unused IPs with attribute inheritance
 - **Flexible Attributes** — Standard fields plus custom attributes
 - **Search** — Find VLANs, subnets, and IPs by CIDR, customer, or location
@@ -130,8 +131,8 @@ On first run, a default admin account is created:
 | Role | Capabilities |
 |------|--------------|
 | **Admin** | Full access including user management, snapshots, database settings |
-| **Editor** | Create, edit, delete VLANs/subnets/IPs; export/import; view audit log |
-| **Viewer** | Read-only: search, list, export, view audit log |
+| **Editor** | Create, edit, delete VLANs/subnets/IPs; manage owned subnets; export/import; view audit log |
+| **Viewer** | Read-only: search, list, view owned subnets, export, view audit log |
 
 ## Navigation
 
@@ -151,9 +152,14 @@ VLAN
       ├── CIDR Range(s)
       └── IP Addresses
            └── Attributes
+
+Owned Subnets (separate from VLANs)
+ └── Tracks utilization by cross-referencing routed VLAN subnets
 ```
 
 Attributes inherit downward: VLAN → Subnet → IP. Setting an attribute at the IP level overrides inherited values.
+
+Owned Subnets exist outside the VLAN hierarchy. They represent public IP blocks your organization has purchased and track how much of that space is allocated across your routed VLANs. Overlapping CIDR ranges across routed VLANs (including within the same routed VLAN) are strictly disallowed to ensure accurate utilization accounting.
 
 ## Deploying as a Linux Login Shell
 

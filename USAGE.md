@@ -23,6 +23,7 @@ Create VLAN
 Create Subnet
 Search
 List
+Owned Subnets
 Export All VLANs
 Import from XLSX
 Audit Log
@@ -59,7 +60,7 @@ From the main menu, select **Create VLAN**.
 
 Enter a VLAN number (1–4094). You'll be asked for a name, whether it's routed, an uplink, and attributes like Customer, Location, and Comment.
 
-**Routed vs. unrouted:** A routed VLAN has its subnets participate in IP routing, which means its CIDR ranges must not overlap with CIDR ranges in other routed VLANs. Unrouted VLANs (the default) have no overlap restrictions — this is normal for isolated layer-2 segments, lab networks, or environments where overlapping address space is intentional.
+**Routed vs. unrouted:** A routed VLAN has its subnets participate in IP routing, which means its CIDR ranges must not overlap with CIDR ranges in any other routed VLAN — or with other subnets in the same routed VLAN. This strict enforcement prevents double-counting and routing conflicts. Unrouted VLANs (the default) have no overlap restrictions — this is normal for isolated layer-2 segments, lab networks, or environments where overlapping address space is intentional.
 
 Once created, you can find your VLAN through **List > VLANs** or **Search > VLAN** (by number).
 
@@ -87,7 +88,7 @@ You can create a subnet two ways:
 1. From the main menu: **Create Subnet** — you'll pick a VLAN first, then enter a name and CIDR.
 2. From inside a VLAN screen: press `n` to add a subnet directly.
 
-A subnet needs at least one CIDR range (like `10.0.0.0/24`). You can add more ranges later — a single subnet can span multiple CIDRs. The ranges cannot overlap with each other within the same subnet, and if the parent VLAN is routed, they can't overlap with ranges in other routed VLANs.
+A subnet needs at least one CIDR range (like `10.0.0.0/24`). You can add more ranges later — a single subnet can span multiple CIDRs. The ranges cannot overlap with each other within the same subnet, and if the parent VLAN is routed, they can't overlap with any range in any routed VLAN — including other subnets in the same VLAN.
 
 After creating the subnet you'll be prompted for attributes (Customer, Location, Comment). These are inheritable — any IP in this subnet will inherit these values unless it has its own override.
 
@@ -148,6 +149,53 @@ You can also export a single VLAN from inside its screen by pressing `x`.
 
 Export files are saved in the current working directory. You'll be prompted for a filename or can leave it blank for an auto-generated timestamp name.
 
+## Owned Subnets
+
+If your datacenter has purchased public IP blocks (e.g., a /24 from your ISP or RIR), the **Owned Subnets** feature lets you track how much of that space you've allocated.
+
+From the main menu, select **Owned Subnets**. This is a top-level section that lives outside the VLAN hierarchy entirely. Owned subnets are not broadcast domains — they're a record of address space you own, with a utilization view that cross-references your routed VLANs.
+
+### Adding an Owned Subnet
+
+Press `n` to add a new block. Enter the CIDR (e.g., `198.51.100.0/24`) and an optional label (e.g., `ISP Allocation - Jan 2025`).
+
+Two restrictions apply:
+
+- **No RFC 1918 space.** Private ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) are rejected. Tracking "ownership" of reusable private space doesn't mean anything — this feature is specifically for public address space you've paid for and need to account for.
+- **No overlaps.** Owned subnets cannot overlap with each other. If you buy additional space that expands an existing block, remove the old entry and add the new larger one. The audit log preserves the history.
+
+### The Owned Subnets List
+
+The list shows each owned CIDR with its label and a utilization summary: `allocated/total (percentage)`. Allocated addresses are counted by looking at CIDR ranges in routed VLANs that fall within the owned block.
+
+Keys on this screen:
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Open the detail view |
+| `n` | Add a new owned subnet |
+| `e` | Rename the selected entry |
+| `d` | Remove the selected entry |
+| `q` | Go back |
+
+### The Detail View
+
+Select an owned subnet and press `Enter` to see the detail screen. This is a split view:
+
+**Left panel** shows the CIDR, label, total/allocated/available address counts, a utilization bar, and a list of available (unallocated) blocks. The available blocks are computed automatically — if you own a /24 and have allocated a /26 and a /25 out of it, the detail view shows you the remaining /26 that's still free.
+
+**Right panel** lists every routed VLAN subnet that falls within the owned range, along with its Customer and Location. Select any allocation and press `Enter` to jump directly to that subnet's screen.
+
+### How Ownership Changes Work
+
+Owned subnets are a flat list — there's no hierarchy, no exclusions, no special states. The list represents what you own right now.
+
+- **Buy a /29** → add it.
+- **Later buy the rest of the /24** → remove the /29, add the /24.
+- **Later sell a /26 out of it** → remove the /24, add back the ranges you kept.
+
+The audit log captures every addition and removal, so you always have a paper trail of how your ownership changed over time.
+
 ## The Audit Log
 
 Every significant action is logged — VLAN creation, subnet deletion, imports, user logins, snapshots, and more. Select **Audit Log** from the main menu to browse it.
@@ -169,6 +217,7 @@ Not every action creates one. Snapshots are created before:
 - Creating a VLAN
 - Deleting a VLAN
 - Deleting a subnet
+- Adding or removing an owned subnet
 - Importing from XLSX
 - Restoring a previous snapshot (yes, you can roll back a rollback)
 
