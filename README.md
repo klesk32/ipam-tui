@@ -1,7 +1,5 @@
 # IPAM/VLAN Manager TUI
 
-[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/klesk32/ipam-tui?quickstart=1)
-
 A terminal-based IP Address Management (IPAM) and VLAN manager with a retro curses interface. Can run standalone in a terminal or be served via a web browser using the included xterm.js web server.
 
 ## Purpose
@@ -9,10 +7,6 @@ A terminal-based IP Address Management (IPAM) and VLAN manager with a retro curs
 I am an infrastructure engineer. This project came about as a way for me to fill the gap for an IPAM that is easy to set up, easy to use, and easy to move around.  I had been using [nipap](https://spritelink.github.io/NIPAP/) for a while, which was the most lightweight IPAM I had seen up to that point beyond using a spreadsheet, and it was still more machinery than I wanted to deal with.  Considering the amount of time I spend ssh'ing into things, having a TUI IPAM seemed reasonable.
 
 *AI use disclosure:* This project made heavy use of Claude Opus in its development.
-
-## Try It
-
-Click the Codespaces badge above to launch a live demo in your browser. The web UI opens automatically with a pre-populated database. Log in with `demo` / `DemoViewer2025!!` to browse, or `admin` / `admin` for full access. Free-tier Codespaces auto-stop after 30 minutes of inactivity.
 
 ## Features
 
