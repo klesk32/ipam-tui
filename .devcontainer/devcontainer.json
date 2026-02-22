@@ -3,7 +3,7 @@
   "image": "mcr.microsoft.com/devcontainers/python:3.12",
 
   "postCreateCommand": "pip install -r requirements.txt && python3 seed_demo.py",
-  "postStartCommand": "python3 ipam-web.py demo.db --host 0.0.0.0 --port 8080 -- --bios &",
+  "postStartCommand": "nohup python3 ipam-web.py demo.db --host 0.0.0.0 --port 8080 -- --bios > /tmp/ipam-web.log 2>&1 &",
 
   "forwardPorts": [8080],
   "portsAttributes": {
