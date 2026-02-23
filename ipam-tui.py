@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # Config
 # =============================================================================
 
-VERSION = "0.9.4"
+VERSION = "0.9.5"
 APP_TITLE = "IPAM / VLAN Manager"
 MAX_ENUM_HOSTS = 4096  # guard rail for enumerating "unused" IPs in a subnet
 VLAN_SUBNET_KEYS = ["Customer", "Location", "Comment"]
@@ -4068,6 +4068,29 @@ def import_from_xlsx(stdscr, db: DB, filename: str, mode: str, db_name: str) -> 
     # Create a snapshot before import so the entire operation can be rolled back
     db.log_action("import_start", f"Import from {filename}", create_snapshot=True)
 
+    # Local caches to avoid repeated queries per row
+    _subnet_cache: Dict[int, list] = {}     # vlan_id -> list of subnet rows
+    _range_cache: Dict[int, list] = {}      # bd_id -> list of CIDR strings
+
+    def cached_subnets(vlan_id: int) -> list:
+        if vlan_id not in _subnet_cache:
+            _subnet_cache[vlan_id] = db.list_subnets(vlan_id)
+        return _subnet_cache[vlan_id]
+
+    def invalidate_subnet_cache(vlan_id: int):
+        _subnet_cache.pop(vlan_id, None)
+
+    def cached_ranges(bd_id: int) -> list:
+        if bd_id not in _range_cache:
+            _range_cache[bd_id] = [r["cidr"] for r in db.list_subnet_ranges(bd_id)]
+        return _range_cache[bd_id]
+
+    def invalidate_range_cache(bd_id: int):
+        _range_cache.pop(bd_id, None)
+
+    # Batch all writes into a single transaction (one fsync instead of hundreds)
+    db._in_transaction = True
+
     for sheet_name in wb.sheetnames:
         sheet = wb[sheet_name]
 
@@ -4179,12 +4202,13 @@ def import_from_xlsx(stdscr, db: DB, filename: str, mode: str, db_name: str) -> 
                 continue
 
             # Find or create subnet
-            subnets = db.list_subnets(vlan_id)
+            subnets = cached_subnets(vlan_id)
             subnet = next((s for s in subnets if s["name"] == subnet_name), None)
 
             if not subnet:
                 try:
                     bd_id = db.create_subnet(vlan_id, subnet_name)
+                    invalidate_subnet_cache(vlan_id)
                     added += 1
                 except Exception as e:
                     errors.append(f"VLAN {vlan_num} row {row_idx}: Failed to create subnet - {e}")
@@ -4195,9 +4219,10 @@ def import_from_xlsx(stdscr, db: DB, filename: str, mode: str, db_name: str) -> 
 
             # Add CIDR to subnet if not exists
             try:
-                existing_ranges = [r["cidr"] for r in db.list_subnet_ranges(bd_id)]
+                existing_ranges = cached_ranges(bd_id)
                 if cidr not in existing_ranges:
                     db.add_subnet_range(bd_id, cidr)
+                    invalidate_range_cache(bd_id)
                     added += 1
             except ValueError as e:
                 errors.append(f"VLAN {vlan_num} row {row_idx}: {e}")
@@ -4330,6 +4355,7 @@ def import_from_xlsx(stdscr, db: DB, filename: str, mode: str, db_name: str) -> 
     # --- Import Owned Subnets sheet ---
     if "Owned_Subnets" in wb.sheetnames:
         os_sheet = wb["Owned_Subnets"]
+        existing_owned = db.list_owned_subnets()
         for row_idx in range(2, os_sheet.max_row + 1):
             os_cidr = os_sheet.cell(row_idx, 1).value
             os_label = os_sheet.cell(row_idx, 2).value or ""
@@ -4339,10 +4365,10 @@ def import_from_xlsx(stdscr, db: DB, filename: str, mode: str, db_name: str) -> 
             os_label = str(os_label).strip()
             try:
                 # Check if this exact CIDR already exists
-                existing_owned = db.list_owned_subnets()
                 already_exists = any(o["cidr"] == str(ipaddress.ip_network(os_cidr, strict=False)) for o in existing_owned)
                 if not already_exists:
                     db.create_owned_subnet(os_cidr, os_label)
+                    existing_owned = db.list_owned_subnets()  # Refresh after insert
                     added += 1
                 else:
                     # Update label if different
@@ -4354,6 +4380,16 @@ def import_from_xlsx(stdscr, db: DB, filename: str, mode: str, db_name: str) -> 
                             break
             except (ValueError, Exception) as e:
                 errors.append(f"Owned subnet {os_cidr}: {e}")
+
+    # Commit the batched transaction (or rollback on failure)
+    try:
+        db.con.commit()
+    except Exception:
+        db.con.rollback()
+        raise
+    finally:
+        db._in_transaction = False
+        db.invalidate_resolve_cache()
 
     show_progress("Done")
     return added, updated, errors
