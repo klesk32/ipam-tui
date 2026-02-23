@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # Config
 # =============================================================================
 
-VERSION = "0.9.5"
+VERSION = "0.9.6"
 APP_TITLE = "IPAM / VLAN Manager"
 MAX_ENUM_HOSTS = 4096  # guard rail for enumerating "unused" IPs in a subnet
 VLAN_SUBNET_KEYS = ["Customer", "Location", "Comment"]
@@ -612,7 +612,7 @@ class DB:
         for r in rows:
             try:
                 existing_net = ipaddress.ip_network(r["cidr"], strict=False)
-                if new_net.overlaps(existing_net):
+                if new_net.version == existing_net.version and new_net.overlaps(existing_net):
                     return (r["vlan_num"], r["cidr"])
             except ValueError:
                 continue
@@ -646,7 +646,7 @@ class DB:
                 try:
                     n1 = ipaddress.ip_network(r1["cidr"], strict=False)
                     n2 = ipaddress.ip_network(r2["cidr"], strict=False)
-                    if n1.overlaps(n2):
+                    if n1.version == n2.version and n1.overlaps(n2):
                         return (r1["cidr"], vlan_num, r2["cidr"])
                 except ValueError:
                     continue
@@ -673,7 +673,7 @@ class DB:
             for other_r in other_rows:
                 try:
                     other_net = ipaddress.ip_network(other_r["cidr"], strict=False)
-                    if my_net.overlaps(other_net):
+                    if my_net.version == other_net.version and my_net.overlaps(other_net):
                         return (my_r["cidr"], other_r["vlan_num"], other_r["cidr"])
                 except ValueError:
                     continue
@@ -733,7 +733,7 @@ class DB:
                 existing_net = ipaddress.ip_network(r["cidr"], strict=False)
             except ValueError:
                 continue
-            if net.overlaps(existing_net):
+            if net.version == existing_net.version and net.overlaps(existing_net):
                 raise ValueError(f"Range {normalized_cidr} overlaps with existing range {r['cidr']} in this subnet")
 
         # Check if this subnet's VLAN is routed, and if so, validate no overlaps
@@ -1168,7 +1168,7 @@ class DB:
         for row in existing:
             try:
                 existing_net = ipaddress.ip_network(row["cidr"], strict=False)
-                if net.overlaps(existing_net):
+                if net.version == existing_net.version and net.overlaps(existing_net):
                     raise ValueError(f"Overlaps with existing owned subnet {row['cidr']}")
             except ValueError as e:
                 if "Overlaps" in str(e) or "RFC 1918" in str(e):
@@ -1223,7 +1223,7 @@ class DB:
         for o in owned:
             owned_net = ipaddress.ip_network(o["cidr"], strict=False)
             total = owned_net.num_addresses
-            allocated = sum(rn.num_addresses for rn in routed_nets if rn.subnet_of(owned_net))
+            allocated = sum(rn.num_addresses for rn in routed_nets if rn.version == owned_net.version and rn.subnet_of(owned_net))
             result[o["id"]] = (allocated, total)
 
         return result
@@ -1250,7 +1250,7 @@ class DB:
         for r in all_routed:
             try:
                 range_net = ipaddress.ip_network(r["cidr"], strict=False)
-                if range_net.subnet_of(owned_net):
+                if range_net.version == owned_net.version and range_net.subnet_of(owned_net):
                     allocated.append({
                         "cidr": r["cidr"],
                         "subnet_name": r["subnet_name"],
@@ -3032,6 +3032,9 @@ def workflow_search(stdscr, db: DB, db_name: str):
             try:
                 parent = ipaddress.ip_network(r["cidr"], strict=False)
             except Exception:
+                continue
+
+            if net.version != parent.version:
                 continue
 
             if net.subnet_of(parent) or parent.subnet_of(net) or net == parent:
