@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # Config
 # =============================================================================
 
-VERSION = "0.9.3"
+VERSION = "0.9.4"
 APP_TITLE = "IPAM / VLAN Manager"
 MAX_ENUM_HOSTS = 4096  # guard rail for enumerating "unused" IPs in a subnet
 VLAN_SUBNET_KEYS = ["Customer", "Location", "Comment"]
@@ -1157,8 +1157,11 @@ class DB:
         net = ipaddress.ip_network(cidr, strict=False)
         normalized = str(net)
 
-        if is_rfc1918(normalized):
-            raise ValueError("RFC 1918 (private) address space cannot be added as an owned subnet")
+        if is_non_routable(normalized):
+            if net.version == 4:
+                raise ValueError("RFC 1918 (private) address space cannot be added as an owned subnet")
+            else:
+                raise ValueError("Non-routable IPv6 space (ULA, link-local, multicast) cannot be added as an owned subnet")
 
         # Check for overlaps with existing owned subnets
         existing = self.list_owned_subnets()
@@ -1289,11 +1292,43 @@ RFC1918_NETWORKS = [
     ipaddress.ip_network('192.168.0.0/16'),
 ]
 
+V6_NON_ROUTABLE_NETWORKS = [
+    ipaddress.ip_network('fc00::/7'),     # ULA (Unique Local Address)
+    ipaddress.ip_network('fe80::/10'),    # Link-local
+    ipaddress.ip_network('ff00::/8'),     # Multicast
+    ipaddress.ip_network('::1/128'),      # Loopback
+]
+
+
+def is_non_routable(cidr: str) -> bool:
+    """Check if a CIDR overlaps with non-routable address space (RFC 1918 for v4, ULA/link-local/multicast for v6)."""
+    net = ipaddress.ip_network(cidr, strict=False)
+    if net.version == 4:
+        return any(net.overlaps(p) for p in RFC1918_NETWORKS)
+    return any(net.overlaps(p) for p in V6_NON_ROUTABLE_NETWORKS)
+
 
 def is_rfc1918(cidr: str) -> bool:
     """Check if a CIDR overlaps with any RFC 1918 private address range."""
     net = ipaddress.ip_network(cidr, strict=False)
     return any(net.overlaps(p) for p in RFC1918_NETWORKS)
+
+
+def ranges_are_v6(ranges) -> bool:
+    """Check if a list of CIDR range strings/rows are IPv6. Returns True if any range is v6."""
+    for r in ranges:
+        cidr = r["cidr"] if hasattr(r, '__getitem__') and not isinstance(r, str) else str(r)
+        try:
+            if ipaddress.ip_network(cidr, strict=False).version == 6:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def v6_max_prefix_for_enum() -> int:
+    """Return the minimum prefix length for which v6 unused enumeration is allowed (e.g. /120 = 256 hosts)."""
+    return 120
 
 
 def compute_unallocated(owned_net, allocated_nets: list) -> list:
@@ -1858,8 +1893,9 @@ def render_list_rows(win, title: str, rows: List[ListRow], sel: int, top: int, i
 
     if show_columns:
         if ip_mode:
-            # IP addresses: fixed narrow label (max 18 for "xxx.xxx.xxx.xxx"), more space for customer
-            label_w = 18
+            # IP addresses: detect if any v6 addresses are present for wider column
+            max_label = max((len(r.label) for r in rows), default=15)
+            label_w = min(max(18, max_label + 1), 42)  # 18 for v4, up to 42 for v6
             remaining = inner_w - label_w - 4
             cust_w = max(12, remaining * 2 // 3)
             loc_w = max(10, remaining - cust_w)
@@ -2321,6 +2357,11 @@ def subnet_unused_ips(db: DB, bd_id: int, used_set: set) -> Optional[List[str]]:
     ranges = [ipaddress.ip_network(r["cidr"], strict=False) for r in db.list_subnet_ranges(bd_id)]
     if not ranges:
         return []
+
+    # For v6 subnets with prefix shorter than /120, don't even try to enumerate
+    for n in ranges:
+        if n.version == 6 and n.prefixlen < v6_max_prefix_for_enum():
+            return None
 
     total = 0
     for n in ranges:
@@ -3588,17 +3629,34 @@ def screen_subnet_menu(
             else:
                 unused = subnet_unused_ips(db, bd_id, used_set)
                 if unused is None:
-                    dialog_message(
-                        stdscr,
-                        breadcrumb,
-                        "Too many addresses",
-                        [
-                            "This subnet is too large to enumerate unused addresses safely.",
-                            f"Limit is {MAX_ENUM_HOSTS} hosts.",
-                            "Switching back to In use view.",
-                        ],
-                        db_name=db_name,
-                    )
+                    # Determine if this is a v6 subnet for a better message
+                    range_rows = db.list_subnet_ranges(bd_id)
+                    is_v6 = ranges_are_v6(range_rows)
+                    if is_v6:
+                        dialog_message(
+                            stdscr,
+                            breadcrumb,
+                            "IPv6 Subnet",
+                            [
+                                "IPv6 subnets are too large to enumerate unused addresses.",
+                                "Use 'i' to assign an IP address directly.",
+                                "",
+                                "Switching to In use view.",
+                            ],
+                            db_name=db_name,
+                        )
+                    else:
+                        dialog_message(
+                            stdscr,
+                            breadcrumb,
+                            "Too many addresses",
+                            [
+                                "This subnet is too large to enumerate unused addresses safely.",
+                                f"Limit is {MAX_ENUM_HOSTS} hosts.",
+                                "Switching back to In use view.",
+                            ],
+                            db_name=db_name,
+                        )
                     show_in_use = True
                     ip_list = used
                 else:
@@ -3671,7 +3729,7 @@ def screen_subnet_menu(
         draw_chrome(
             stdscr,
             breadcrumb,
-            "t: toggle in-use/unused Enter: edit IP e: edit subnet n: rename subnet m: move VLAN d: delete q: back Esc: main menu",
+            "t: toggle in-use/unused i: assign IP Enter: edit IP e: edit subnet n: rename m: move d: delete q: back Esc: main",
             db_name=db_name,
         )
 
@@ -3732,6 +3790,17 @@ def screen_subnet_menu(
                 top = 0
                 need_rebuild = True
 
+            elif c in (ord("i"), ord("I")):
+                if require_edit(stdscr, db, breadcrumb):
+                    ip_str = edit_line_dialog(stdscr, breadcrumb, "Assign IP", "IP address:", "", db_name=db_name)
+                    if ip_str and ip_str.strip():
+                        try:
+                            ipaddress.ip_address(ip_str.strip())
+                            screen_edit_ip_in_subnet(stdscr, db, ip_str.strip(), breadcrumb, db_name=db_name)
+                            need_rebuild = True
+                        except ValueError:
+                            dialog_message(stdscr, breadcrumb, "Error", [f"Invalid IP address: {ip_str.strip()}"], db_name=db_name)
+
             elif c in (ord("e"), ord("E"), ord("n"), ord("N"), ord("m"), ord("M"), ord("d"), ord("D")):
                 subnet, vlan, need_rebuild, was_deleted = _handle_subnet_command(stdscr, db, c, bd_id, subnet, vlan, breadcrumb, db_name)
                 if was_deleted:
@@ -3790,6 +3859,17 @@ def screen_subnet_menu(
             ip_str = rows[sel].label
             screen_edit_ip_in_subnet(stdscr, db, ip_str, breadcrumb, db_name=db_name)
             need_rebuild = True  # Rebuild after editing in case attributes changed
+
+        elif c in (ord("i"), ord("I")):
+            if require_edit(stdscr, db, breadcrumb):
+                ip_str = edit_line_dialog(stdscr, breadcrumb, "Assign IP", "IP address:", "", db_name=db_name)
+                if ip_str and ip_str.strip():
+                    try:
+                        ipaddress.ip_address(ip_str.strip())
+                        screen_edit_ip_in_subnet(stdscr, db, ip_str.strip(), breadcrumb, db_name=db_name)
+                        need_rebuild = True
+                    except ValueError:
+                        dialog_message(stdscr, breadcrumb, "Error", [f"Invalid IP address: {ip_str.strip()}"], db_name=db_name)
 
         elif c in (ord("e"), ord("E"), ord("n"), ord("N"), ord("m"), ord("M"), ord("d"), ord("D")):
             subnet, vlan, need_rebuild, was_deleted = _handle_subnet_command(stdscr, db, c, bd_id, subnet, vlan, breadcrumb, db_name)

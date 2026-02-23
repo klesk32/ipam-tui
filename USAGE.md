@@ -102,6 +102,7 @@ Keys on this screen:
 |-----|--------|
 | `Enter` | Edit the selected IP's attributes |
 | `t` | Toggle between in-use and unused IPs |
+| `i` | Assign an IP address directly (enter manually) |
 | `e` | Edit subnet attributes |
 | `n` | Rename the subnet |
 | `m` | Move the subnet to a different VLAN |
@@ -128,6 +129,33 @@ Select any IP from the subnet view and press `Enter` to edit its attributes. You
 Fields that match the inherited subnet/VLAN value are shown but empty — you only need to fill in values that differ. Press `s` to save, `a` to add a custom key beyond the standard ones, `q` to cancel.
 
 You can also get to an IP directly from the main menu via **Search > IP address** or through **List > IP addresses (stored)**.
+
+## IPv6 Subnets
+
+IPv6 works the same as IPv4 — just enter a v6 CIDR when creating a subnet. A single VLAN can contain both v4 and v6 subnets side by side.
+
+```
+VLAN 100 "Core"
+ ├── Servers-v4      10.0.100.0/24
+ └── Servers-v6      2001:db8:10:100::/64
+```
+
+The key difference is in how you work with individual IP addresses. A /64 has 2^64 host addresses — far too many to enumerate. The "unused" toggle (`t`) is disabled for any IPv6 subnet larger than a /120 (256 addresses). Instead, use the `i` key to assign addresses directly:
+
+1. Open the subnet screen
+2. Press `i`
+3. Type the full IPv6 address (e.g., `2001:db8:10:100::1`)
+4. Fill in attributes and save
+
+The in-use view works normally — it shows every IPv6 address that has attributes assigned. Search also works across both address families: you can search by IPv6 CIDR or by a specific address.
+
+For small IPv6 subnets (/120 or smaller), the unused view works exactly like IPv4 and you can browse and pick from a list.
+
+### IPv6 Tips
+
+- Use the documentation prefix `2001:db8::/32` for testing — it will never conflict with real addresses.
+- Overlap enforcement works across address families within routed VLANs. A v4 range can't overlap with another v4 range, and a v6 range can't overlap with another v6 range. (They can't overlap across families either, but that's physically impossible.)
+- Owned subnets work for v6 public allocations. Non-routable v6 space (ULA `fc00::/7`, link-local, multicast) is rejected, just like RFC 1918 is rejected for v4.
 
 ## Searching
 
@@ -161,7 +189,7 @@ Press `n` to add a new block. Enter the CIDR (e.g., `198.51.100.0/24`) and an op
 
 Two restrictions apply:
 
-- **No RFC 1918 space.** Private ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) are rejected. Tracking "ownership" of reusable private space doesn't mean anything — this feature is specifically for public address space you've paid for and need to account for.
+- **No private/non-routable space.** For IPv4, RFC 1918 ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) are rejected. For IPv6, ULA (fc00::/7), link-local (fe80::/10), and multicast (ff00::/8) are rejected. This feature is specifically for public address space you've paid for and need to account for.
 - **No overlaps.** Owned subnets cannot overlap with each other. If you buy additional space that expands an existing block, remove the old entry and add the new larger one. The audit log preserves the history.
 
 ### The Owned Subnets List
@@ -271,6 +299,7 @@ Each user can set their own terminal color scheme via **Configure > My Color Pre
 - Attribute inheritance saves a lot of typing. Set Customer and Location at the VLAN or subnet level, and only override at the IP level when something differs.
 - The CIDR search is bidirectional — use it to find "everything in this /16" or "which /24 contains this /25."
 - Exports only include attribute values that differ from inherited values, keeping spreadsheets clean.
+- IPv6 subnets work alongside IPv4 in the same VLANs — use the `i` key to assign addresses directly in large v6 subnets.
 
 ## Moving to Production
 
@@ -282,3 +311,6 @@ python ipam-tui.py production.db
 ```
 
 Fresh database, clean slate. Set your database name, change the default admin password, create user accounts for your team, and start building your real data.
+
+---
+*Documentation v0.3.0*

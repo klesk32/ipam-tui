@@ -15,7 +15,7 @@ import termios
 
 from aiohttp import web, WSMsgType
 
-VERSION = "0.9.0"
+VERSION = "0.9.4"
 
 # HTML template with xterm.js
 HTML_TEMPLATE = """<!DOCTYPE html>
@@ -489,7 +489,7 @@ def main():
     app.router.add_get('/exports/', exports_list_handler)
     app.router.add_get('/exports/{session_id}/{filename}', exports_file_handler)
 
-    print(f"IPAM TUI Web Interface v1.0.0")
+    print(f"IPAM TUI Web Interface v{VERSION}")
     print(f"Database: {db_path}")
     print(f"Exports:  {exports_dir}")
     if tui_flags:

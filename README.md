@@ -19,7 +19,8 @@ I am an infrastructure engineer. This project came about as a way for me to fill
 - **Multi-User Support** — Login system with role-based access control (Admin/Editor/Viewer)
 - **VLAN Management** — Create, edit, delete VLANs with routed/unrouted designation
 - **Subnet Management** — Organize subnets within VLANs, multiple CIDR ranges per subnet
-- **Owned Subnets** — Track purchased public IP blocks and their utilization across routed VLANs
+- **IPv4 and IPv6** — Full support for both address families, mixed within the same VLANs
+- **Owned Subnets** — Track purchased public IP blocks (v4 and v6) and their utilization across routed VLANs
 - **IP Address Tracking** — View in-use and unused IPs with attribute inheritance
 - **Flexible Attributes** — Standard fields plus custom attributes
 - **Search** — Find VLANs, subnets, and IPs by CIDR, customer, or location
@@ -147,6 +148,7 @@ On first run, a default admin account is created:
 | `↑`/`↓` or `j`/`k` | Move selection |
 | `PgUp`/`PgDn` | Page through lists |
 | `Enter` | Select/confirm |
+| `i` | Assign IP directly (subnet screen) |
 | `q` | Back/cancel |
 | `Esc` | Return to main menu |
 
@@ -164,6 +166,8 @@ Owned Subnets (separate from VLANs)
 ```
 
 Attributes inherit downward: VLAN → Subnet → IP. Setting an attribute at the IP level overrides inherited values.
+
+VLANs can contain both IPv4 and IPv6 subnets simultaneously. The address family is determined by the CIDR ranges — no separate mode or configuration is needed. For IPv6 subnets larger than a /120, unused address enumeration is disabled and IPs are assigned directly using the `i` key.
 
 Owned Subnets exist outside the VLAN hierarchy. They represent public IP blocks your organization has purchased and track how much of that space is allocated across your routed VLANs. Overlapping CIDR ranges across routed VLANs (including within the same routed VLAN) are strictly disallowed to ensure accurate utilization accounting.
 
@@ -278,3 +282,6 @@ All data is stored in a single SQLite database file including user credentials (
 ## License
 
 MIT
+
+---
+*Documentation v0.3.0*
