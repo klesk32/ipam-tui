@@ -271,7 +271,6 @@ exec /opt/ipam/.venv/bin/python3 /opt/ipam/ipam-tui.py "$DB"
 - `ipam-web.py` — Web server wrapper (requires aiohttp)
 - `requirements.txt` — Python dependencies
 - `example_data.xlsx` — Sample data with 14 VLANs and owned subnets for demos
-- `.devcontainer/` — GitHub Codespaces configuration
 - `*.db` — SQLite database (created automatically)
 
 All data is stored in a single SQLite database file including user credentials (hashed), snapshots, and audit logs.
