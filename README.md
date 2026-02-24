@@ -12,8 +12,6 @@ I am an infrastructure engineer. This project came about as a way for me to fill
 
 [![demo](https://asciinema.org/a/cSVu0XhR9so5Ch0O.svg)](https://asciinema.org/a/cSVu0XhR9so5Ch0O)
 
-*The XLSX import in this recording has been trimmed for brevity — real import time depends on dataset size.*
-
 ## Features
 
 - **Multi-User Support** — Login system with role-based access control (Admin/Editor/Viewer)
