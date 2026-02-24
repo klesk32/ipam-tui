@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # Config
 # =============================================================================
 
-VERSION = "0.9.8"
+VERSION = "0.9.10"
 APP_TITLE = "IPAM / VLAN Manager"
 MAX_ENUM_HOSTS = 4096  # guard rail for enumerating "unused" IPs in a subnet
 VLAN_SUBNET_KEYS = ["Customer", "Location", "Comment"]
@@ -778,13 +778,14 @@ class DB:
 
     # ---- Attributes ----
 
-    def get_attrs(self, scope: str, scope_id: int) -> Dict[str, str]:
+    def get_attrs(self, scope: str, scope_id: int, include_defaults: bool = True) -> Dict[str, str]:
         rows = self.q("SELECT key,value FROM attributes WHERE scope=? AND scope_id=?", (scope, scope_id))
         out = {r["key"]: r["value"] for r in rows}
-        # Default keys based on scope
-        default_keys = VLAN_SUBNET_KEYS if scope in ('vlan', 'bd') else STANDARD_KEYS
-        for k in default_keys:
-            out.setdefault(k, "")
+        if include_defaults:
+            # Default keys based on scope
+            default_keys = VLAN_SUBNET_KEYS if scope in ('vlan', 'bd') else STANDARD_KEYS
+            for k in default_keys:
+                out.setdefault(k, "")
         return out
 
     def upsert_attr(self, scope: str, scope_id: int, key: str, value: str, inheritable: int):
@@ -875,9 +876,9 @@ class DB:
         res = self.resolve_for_ip(ip_str)
         inherited: Dict[str, str] = {}
         if res.vlan_id is not None:
-            inherited.update(self.get_attrs("vlan", res.vlan_id))
+            inherited.update(self.get_attrs("vlan", res.vlan_id, include_defaults=False))
         if res.bd_id is not None:
-            inherited.update(self.get_attrs("bd", res.bd_id))
+            inherited.update(self.get_attrs("bd", res.bd_id, include_defaults=False))
         for k in STANDARD_KEYS:
             inherited.setdefault(k, "")
         return res, inherited
@@ -3771,6 +3772,20 @@ def screen_subnet_menu(
         inner_w = left_w - 4
         ranges = [r["cidr"] for r in db.list_subnet_ranges(bd_id)]
         cust, loc = db.batch_aggregate_for_subnets([bd_id]).get(bd_id, ("", ""))
+        # Fall back to VLAN-level attrs if subnet has no Customer/Location
+        if not cust or not loc:
+            vlan_attrs = db.get_attrs("vlan", vlan["id"], include_defaults=False)
+            if not cust:
+                cust = vlan_attrs.get("Customer", "")
+            if not loc:
+                loc = vlan_attrs.get("Location", "")
+        # Fall back to VLAN-level attrs if subnet has no Customer/Location
+        if not cust or not loc:
+            vlan_attrs = db.get_attrs("vlan", vlan["id"], include_defaults=False)
+            if not cust:
+                cust = vlan_attrs.get("Customer", "")
+            if not loc:
+                loc = vlan_attrs.get("Location", "")
 
         left.addnstr(2, 2, f"Subnet: {subnet['name']}", inner_w, cp(CP_NORMAL) | curses.A_BOLD)
         left.addnstr(3, 2, f"VLAN: {vlan['vlan_num']} {vlan['name']}", inner_w)
