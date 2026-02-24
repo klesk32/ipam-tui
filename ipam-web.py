@@ -15,7 +15,7 @@ import termios
 
 from aiohttp import web, WSMsgType
 
-VERSION = "0.9.6"
+VERSION = "0.9.7"
 
 # HTML template with xterm.js
 HTML_TEMPLATE = """<!DOCTYPE html>

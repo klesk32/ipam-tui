@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # Config
 # =============================================================================
 
-VERSION = "0.9.6"
+VERSION = "0.9.7"
 APP_TITLE = "IPAM / VLAN Manager"
 MAX_ENUM_HOSTS = 4096  # guard rail for enumerating "unused" IPs in a subnet
 VLAN_SUBNET_KEYS = ["Customer", "Location", "Comment"]
@@ -1329,6 +1329,23 @@ def ranges_are_v6(ranges) -> bool:
 def v6_max_prefix_for_enum() -> int:
     """Return the minimum prefix length for which v6 unused enumeration is allowed (e.g. /120 = 256 hosts)."""
     return 120
+
+
+def fmt_addr_count(n: int) -> str:
+    """Format a large address count. Uses 2^N notation for huge v6 numbers."""
+    if n < 1_000_000:
+        return f"{n:,}"
+    if n & (n - 1) == 0:  # Exact power of 2
+        return f"2^{n.bit_length() - 1}"
+    return f"~2^{n.bit_length() - 1}"
+
+
+def fmt_utilization(alloc: int, total: int) -> str:
+    """Format utilization string. Compact for v6-scale totals, detailed for v4."""
+    pct = (alloc / total * 100) if total > 0 else 0
+    if total > 1_000_000:
+        return f"{pct:.1f}% ({fmt_addr_count(alloc)}/{fmt_addr_count(total)})"
+    return f"{alloc:,}/{total:,} ({pct:.1f}%)"
 
 
 def compute_unallocated(owned_net, allocated_nets: list) -> list:
@@ -4690,11 +4707,10 @@ def workflow_owned_subnets(stdscr, db: DB, db_name: str):
         rows = []
         for o in owned:
             alloc, total = utilization.get(o["id"], (0, 0))
-            pct = (alloc / total * 100) if total > 0 else 0
             label_part = f" {o['label']}" if o["label"] else ""
             rows.append(ListRow(
                 label=f"{o['cidr']}{label_part}",
-                customer=f"{alloc}/{total} ({pct:.1f}%)",
+                customer=fmt_utilization(alloc, total),
                 location="",
             ))
 
@@ -4840,9 +4856,9 @@ def screen_owned_subnet_detail(stdscr, db: DB, owned_id: int, db_name: str = "")
         if info["label"]:
             left.addnstr(y, 2, f"Label: {info['label']}", inner_w); y += 1
         y += 1
-        left.addnstr(y, 2, f"Total: {total} addresses", inner_w); y += 1
-        left.addnstr(y, 2, f"Allocated: {alloc} ({pct_alloc:.1f}%)", inner_w); y += 1
-        left.addnstr(y, 2, f"Available: {avail} ({pct_avail:.1f}%)", inner_w); y += 1
+        left.addnstr(y, 2, f"Total: {fmt_addr_count(total)} addresses", inner_w); y += 1
+        left.addnstr(y, 2, f"Allocated: {fmt_addr_count(alloc)} ({pct_alloc:.1f}%)", inner_w); y += 1
+        left.addnstr(y, 2, f"Available: {fmt_addr_count(avail)} ({pct_avail:.1f}%)", inner_w); y += 1
 
         # Draw utilization bar
         y += 1
