@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # Config
 # =============================================================================
 
-VERSION = "0.9.7"
+VERSION = "0.9.8"
 APP_TITLE = "IPAM / VLAN Manager"
 MAX_ENUM_HOSTS = 4096  # guard rail for enumerating "unused" IPs in a subnet
 VLAN_SUBNET_KEYS = ["Customer", "Location", "Comment"]
@@ -185,6 +185,7 @@ class DB:
     def __init__(self, path: str):
         self.con = sqlite3.connect(path, check_same_thread=False)
         self.con.row_factory = sqlite3.Row
+        self.con.execute("PRAGMA journal_mode=WAL")
         self._in_transaction = False
         self.current_user: Optional[User] = None
         self.db_name: str = ""
@@ -516,6 +517,7 @@ class DB:
         # Reconnect
         self.con = sqlite3.connect(db_path, check_same_thread=False)
         self.con.row_factory = sqlite3.Row
+        self.con.execute("PRAGMA journal_mode=WAL")
         self.invalidate_resolve_cache()
 
         return backup_file
