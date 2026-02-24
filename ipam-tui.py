@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # Config
 # =============================================================================
 
-VERSION = "0.9.10"
+VERSION = "0.9.11"
 APP_TITLE = "IPAM / VLAN Manager"
 MAX_ENUM_HOSTS = 4096  # guard rail for enumerating "unused" IPs in a subnet
 VLAN_SUBNET_KEYS = ["Customer", "Location", "Comment"]
@@ -4126,193 +4126,249 @@ def import_from_xlsx(stdscr, db: DB, filename: str, mode: str, db_name: str) -> 
         _range_cache.pop(bd_id, None)
 
     # Batch all writes into a single transaction (one fsync instead of hundreds)
-    db._in_transaction = True
+    with db.transaction():
 
-    for sheet_name in wb.sheetnames:
-        sheet = wb[sheet_name]
+        for sheet_name in wb.sheetnames:
+            sheet = wb[sheet_name]
 
-        # Parse VLAN info from sheet name
-        if not sheet_name.startswith("VLAN_"):
-            if sheet_name != "Owned_Subnets":
-                errors.append(f"Skipping sheet '{sheet_name}' - doesn't start with VLAN_")
-            continue
+            # Parse VLAN info from sheet name
+            if not sheet_name.startswith("VLAN_"):
+                if sheet_name != "Owned_Subnets":
+                    errors.append(f"Skipping sheet '{sheet_name}' - doesn't start with VLAN_")
+                continue
 
-        parts = sheet_name.split("_", 2)
-        if len(parts) < 2:
-            errors.append(f"Skipping sheet '{sheet_name}' - invalid format")
-            continue
+            parts = sheet_name.split("_", 2)
+            if len(parts) < 2:
+                errors.append(f"Skipping sheet '{sheet_name}' - invalid format")
+                continue
 
-        try:
-            vlan_num = int(parts[1])
-        except ValueError:
-            errors.append(f"Skipping sheet '{sheet_name}' - invalid VLAN number")
-            continue
-
-        # Read VLAN metadata from row 1
-        vlan_name = ""
-        vlan_routed = 0
-        vlan_uplink = ""
-        vlan_attrs = {}
-
-        for col_idx in range(2, 20):  # Check first 20 columns
-            cell_val = sheet.cell(1, col_idx).value
-            if cell_val and isinstance(cell_val, str):
-                if cell_val.lower().startswith("name:"):
-                    vlan_name = cell_val.split(":", 1)[1].strip()
-                elif cell_val.lower().startswith("routed:"):
-                    routed_str = cell_val.split(":", 1)[1].strip().lower()
-                    vlan_routed = 1 if routed_str == "yes" else 0
-                elif cell_val.lower().startswith("uplink:"):
-                    vlan_uplink = cell_val.split(":", 1)[1].strip()
-                elif ":" in cell_val:
-                    key, val = cell_val.split(":", 1)
-                    vlan_attrs[key.strip()] = val.strip()
-
-        # Check if VLAN exists
-        existing_vlan = db.get_vlan_by_num(vlan_num)
-
-        if existing_vlan:
-            vlan_id = existing_vlan["id"]
-
-            # Handle routed flag change
-            if existing_vlan["routed"] != vlan_routed:
-                if vlan_routed == 1:
-                    conflict = db.check_vlan_can_be_routed(vlan_id)
-                    if conflict:
-                        errors.append(f"VLAN {vlan_num}: Cannot mark as routed - subnet {conflict[0]} overlaps with VLAN {conflict[1]} subnet {conflict[2]}")
-                        continue
-                db.update_vlan_routed(vlan_id, vlan_routed)
-                updated += 1
-
-            # Handle uplink change
-            existing_uplink = existing_vlan['uplink'] if 'uplink' in existing_vlan.keys() else ""
-            if existing_uplink != vlan_uplink:
-                db.update_vlan_uplink(vlan_id, vlan_uplink)
-                updated += 1
-        else:
-            # Create new VLAN
             try:
-                vlan_id = db.create_vlan(vlan_num, vlan_name, vlan_routed, vlan_uplink)
-                added += 1
-            except Exception as e:
-                errors.append(f"VLAN {vlan_num}: Failed to create - {e}")
+                vlan_num = int(parts[1])
+            except ValueError:
+                errors.append(f"Skipping sheet '{sheet_name}' - invalid VLAN number")
                 continue
 
-        # Update VLAN attributes
-        for key, val in vlan_attrs.items():
-            db.upsert_attr("vlan", vlan_id, key, val, 1)
+            # Read VLAN metadata from row 1
+            vlan_name = ""
+            vlan_routed = 0
+            vlan_uplink = ""
+            vlan_attrs = {}
 
-        # Read headers from row 3
-        headers = []
-        for col_idx in range(1, sheet.max_column + 1):
-            header = sheet.cell(3, col_idx).value
-            if header:
-                headers.append((col_idx, str(header)))
+            for col_idx in range(2, 20):  # Check first 20 columns
+                cell_val = sheet.cell(1, col_idx).value
+                if cell_val and isinstance(cell_val, str):
+                    if cell_val.lower().startswith("name:"):
+                        vlan_name = cell_val.split(":", 1)[1].strip()
+                    elif cell_val.lower().startswith("routed:"):
+                        routed_str = cell_val.split(":", 1)[1].strip().lower()
+                        vlan_routed = 1 if routed_str == "yes" else 0
+                    elif cell_val.lower().startswith("uplink:"):
+                        vlan_uplink = cell_val.split(":", 1)[1].strip()
+                    elif ":" in cell_val:
+                        key, val = cell_val.split(":", 1)
+                        vlan_attrs[key.strip()] = val.strip()
 
-        # Find column indices
-        subnet_col = next((c for c, h in headers if h.lower() == "subnet name"), None)
-        cidr_col = next((c for c, h in headers if h.lower() == "cidr"), None)
-        ip_col = next((c for c, h in headers if h.lower() == "ip address"), None)
-        attr_cols = [(c, h) for c, h in headers if h in STANDARD_KEYS or h in db.get_all_custom_keys()]
+            # Check if VLAN exists
+            existing_vlan = db.get_vlan_by_num(vlan_num)
 
-        if not subnet_col or not cidr_col or not ip_col:
-            errors.append(f"VLAN {vlan_num}: Missing required columns")
-            continue
+            if existing_vlan:
+                vlan_id = existing_vlan["id"]
 
-        # Process data rows
-        for row_idx in range(4, sheet.max_row + 1):
-            subnet_name = sheet.cell(row_idx, subnet_col).value
-            cidr = sheet.cell(row_idx, cidr_col).value
-            ip_addr = sheet.cell(row_idx, ip_col).value
+                # Handle routed flag change
+                if existing_vlan["routed"] != vlan_routed:
+                    if vlan_routed == 1:
+                        conflict = db.check_vlan_can_be_routed(vlan_id)
+                        if conflict:
+                            errors.append(f"VLAN {vlan_num}: Cannot mark as routed - subnet {conflict[0]} overlaps with VLAN {conflict[1]} subnet {conflict[2]}")
+                            continue
+                    db.update_vlan_routed(vlan_id, vlan_routed)
+                    updated += 1
 
-            if not subnet_name and not cidr and not ip_addr:
-                processed_rows += 1
-                continue  # Empty row
-
-            subnet_name = str(subnet_name or "").strip()
-            cidr = str(cidr or "").strip()
-            ip_addr = str(ip_addr or "").strip()
-
-            if not cidr:
-                errors.append(f"VLAN {vlan_num} row {row_idx}: Missing CIDR")
-                processed_rows += 1
-                continue
-
-            # Find or create subnet
-            subnets = cached_subnets(vlan_id)
-            subnet = next((s for s in subnets if s["name"] == subnet_name), None)
-
-            if not subnet:
+                # Handle uplink change
+                existing_uplink = existing_vlan['uplink'] if 'uplink' in existing_vlan.keys() else ""
+                if existing_uplink != vlan_uplink:
+                    db.update_vlan_uplink(vlan_id, vlan_uplink)
+                    updated += 1
+            else:
+                # Create new VLAN
                 try:
-                    bd_id = db.create_subnet(vlan_id, subnet_name)
-                    invalidate_subnet_cache(vlan_id)
+                    vlan_id = db.create_vlan(vlan_num, vlan_name, vlan_routed, vlan_uplink)
                     added += 1
                 except Exception as e:
-                    errors.append(f"VLAN {vlan_num} row {row_idx}: Failed to create subnet - {e}")
-                    processed_rows += 1
+                    errors.append(f"VLAN {vlan_num}: Failed to create - {e}")
                     continue
-            else:
-                bd_id = subnet["id"]
 
-            # Add CIDR to subnet if not exists
-            try:
-                existing_ranges = cached_ranges(bd_id)
-                if cidr not in existing_ranges:
-                    db.add_subnet_range(bd_id, cidr)
-                    invalidate_range_cache(bd_id)
-                    added += 1
-            except ValueError as e:
-                errors.append(f"VLAN {vlan_num} row {row_idx}: {e}")
-                processed_rows += 1
+            # Update VLAN attributes
+            for key, val in vlan_attrs.items():
+                db.upsert_attr("vlan", vlan_id, key, val, 1)
+
+            # Read headers from row 3
+            headers = []
+            for col_idx in range(1, sheet.max_column + 1):
+                header = sheet.cell(3, col_idx).value
+                if header:
+                    headers.append((col_idx, str(header)))
+
+            # Find column indices
+            subnet_col = next((c for c, h in headers if h.lower() == "subnet name"), None)
+            cidr_col = next((c for c, h in headers if h.lower() == "cidr"), None)
+            ip_col = next((c for c, h in headers if h.lower() == "ip address"), None)
+            attr_cols = [(c, h) for c, h in headers if h in STANDARD_KEYS or h in db.get_all_custom_keys()]
+
+            if not subnet_col or not cidr_col or not ip_col:
+                errors.append(f"VLAN {vlan_num}: Missing required columns")
                 continue
 
-            # Process IP if present, otherwise treat as subnet-level attribute row
-            if ip_addr:
-                try:
-                    # Validate IP is within the subnet CIDR range
-                    ip_obj = ipaddress.ip_address(ip_addr)
-                    cidr_net = ipaddress.ip_network(cidr, strict=False)
-                    if ip_obj not in cidr_net:
-                        errors.append(f"VLAN {vlan_num} row {row_idx}: IP {ip_addr} is outside subnet range {cidr}")
+            # Process data rows
+            for row_idx in range(4, sheet.max_row + 1):
+                subnet_name = sheet.cell(row_idx, subnet_col).value
+                cidr = sheet.cell(row_idx, cidr_col).value
+                ip_addr = sheet.cell(row_idx, ip_col).value
+
+                if not subnet_name and not cidr and not ip_addr:
+                    processed_rows += 1
+                    continue  # Empty row
+
+                subnet_name = str(subnet_name or "").strip()
+                cidr = str(cidr or "").strip()
+                ip_addr = str(ip_addr or "").strip()
+
+                if not cidr:
+                    errors.append(f"VLAN {vlan_num} row {row_idx}: Missing CIDR")
+                    processed_rows += 1
+                    continue
+
+                # Find or create subnet
+                subnets = cached_subnets(vlan_id)
+                subnet = next((s for s in subnets if s["name"] == subnet_name), None)
+
+                if not subnet:
+                    try:
+                        bd_id = db.create_subnet(vlan_id, subnet_name)
+                        invalidate_subnet_cache(vlan_id)
+                        added += 1
+                    except Exception as e:
+                        errors.append(f"VLAN {vlan_num} row {row_idx}: Failed to create subnet - {e}")
                         processed_rows += 1
                         continue
+                else:
+                    bd_id = subnet["id"]
 
-                    ip_id = db.ensure_ip(ip_addr)
-                    ip_row = db.get_ip_row(ip_addr)
-
-                    # Link IP to subnet if not already
-                    if not ip_row["bd_id"] or ip_row["bd_id"] != bd_id:
-                        db.set_ip_links(ip_id, vlan_id, bd_id)
+                # Add CIDR to subnet if not exists
+                try:
+                    existing_ranges = cached_ranges(bd_id)
+                    if cidr not in existing_ranges:
+                        db.add_subnet_range(bd_id, cidr)
+                        invalidate_range_cache(bd_id)
                         added += 1
+                except ValueError as e:
+                    errors.append(f"VLAN {vlan_num} row {row_idx}: {e}")
+                    processed_rows += 1
+                    continue
 
-                    # Process attributes
-                    import_keys = set()
+                # Process IP if present, otherwise treat as subnet-level attribute row
+                if ip_addr:
+                    try:
+                        # Validate IP is within the subnet CIDR range
+                        ip_obj = ipaddress.ip_address(ip_addr)
+                        cidr_net = ipaddress.ip_network(cidr, strict=False)
+                        if ip_obj not in cidr_net:
+                            errors.append(f"VLAN {vlan_num} row {row_idx}: IP {ip_addr} is outside subnet range {cidr}")
+                            processed_rows += 1
+                            continue
+
+                        ip_id = db.ensure_ip(ip_addr)
+                        ip_row = db.get_ip_row(ip_addr)
+
+                        # Link IP to subnet if not already
+                        if not ip_row["bd_id"] or ip_row["bd_id"] != bd_id:
+                            db.set_ip_links(ip_id, vlan_id, bd_id)
+                            added += 1
+
+                        # Process attributes
+                        import_keys = set()
+                        for col_idx, attr_key in attr_cols:
+                            val = sheet.cell(row_idx, col_idx).value
+                            if val:
+                                val_str = str(val).strip()
+                                # Backwards compat: skip old [Subnet: ...] markers on IP rows
+                                if val_str.startswith("[Subnet:"):
+                                    continue
+                                import_keys.add(attr_key)
+
+                                if mode in ("overwrite", "prefer_import"):
+                                    db.upsert_attr("ip", ip_id, attr_key, val_str, 0)
+                                    updated += 1
+                                elif mode == "prefer_db":
+                                    existing = db.get_attrs("ip", ip_id)
+                                    if attr_key not in existing or not existing[attr_key]:
+                                        db.upsert_attr("ip", ip_id, attr_key, val_str, 0)
+                                        updated += 1
+                                elif mode == "interactive":
+                                    existing = db.get_attrs("ip", ip_id)
+                                    if attr_key in existing and existing[attr_key] and existing[attr_key] != val_str:
+                                        choice = dialog_yes_no(
+                                            stdscr,
+                                            "Import conflict",
+                                            "Attribute conflict",
+                                            [
+                                                f"IP: {ip_addr}",
+                                                f"Key: {attr_key}",
+                                                f"DB value: {existing[attr_key]}",
+                                                f"Import value: {val_str}",
+                                                "",
+                                                "Use imported value?"
+                                            ],
+                                            default_yes=False,
+                                            db_name=db_name
+                                        )
+                                        if choice:
+                                            db.upsert_attr("ip", ip_id, attr_key, val_str, 0)
+                                            updated += 1
+                                    else:
+                                        db.upsert_attr("ip", ip_id, attr_key, val_str, 0)
+                                        updated += 1
+
+                        # Overwrite mode: clear DB attrs not present in the import
+                        if mode == "overwrite":
+                            existing = db.get_attrs("ip", ip_id)
+                            for k, v in existing.items():
+                                if k not in import_keys and (v or "").strip():
+                                    db.delete_attr("ip", ip_id, k)
+                                    updated += 1
+
+                    except Exception as e:
+                        errors.append(f"VLAN {vlan_num} row {row_idx} IP {ip_addr}: {e}")
+
+                else:
+                    # No IP address = subnet-level attribute row
                     for col_idx, attr_key in attr_cols:
                         val = sheet.cell(row_idx, col_idx).value
                         if val:
                             val_str = str(val).strip()
-                            # Backwards compat: skip old [Subnet: ...] markers on IP rows
-                            if val_str.startswith("[Subnet:"):
+                            # Backwards compat: strip old [Subnet: ...] wrapper
+                            if val_str.startswith("[Subnet:") and val_str.endswith("]"):
+                                val_str = val_str[len("[Subnet:"):].rstrip("]").strip()
+                            if not val_str:
                                 continue
-                            import_keys.add(attr_key)
 
                             if mode in ("overwrite", "prefer_import"):
-                                db.upsert_attr("ip", ip_id, attr_key, val_str, 0)
+                                db.upsert_attr("bd", bd_id, attr_key, val_str, 1)
                                 updated += 1
                             elif mode == "prefer_db":
-                                existing = db.get_attrs("ip", ip_id)
+                                existing = db.get_attrs("bd", bd_id)
                                 if attr_key not in existing or not existing[attr_key]:
-                                    db.upsert_attr("ip", ip_id, attr_key, val_str, 0)
+                                    db.upsert_attr("bd", bd_id, attr_key, val_str, 1)
                                     updated += 1
                             elif mode == "interactive":
-                                existing = db.get_attrs("ip", ip_id)
+                                existing = db.get_attrs("bd", bd_id)
                                 if attr_key in existing and existing[attr_key] and existing[attr_key] != val_str:
                                     choice = dialog_yes_no(
                                         stdscr,
                                         "Import conflict",
-                                        "Attribute conflict",
+                                        "Subnet attribute conflict",
                                         [
-                                            f"IP: {ip_addr}",
+                                            f"Subnet: {subnet_name}",
                                             f"Key: {attr_key}",
                                             f"DB value: {existing[attr_key]}",
                                             f"Import value: {val_str}",
@@ -4323,110 +4379,47 @@ def import_from_xlsx(stdscr, db: DB, filename: str, mode: str, db_name: str) -> 
                                         db_name=db_name
                                     )
                                     if choice:
-                                        db.upsert_attr("ip", ip_id, attr_key, val_str, 0)
+                                        db.upsert_attr("bd", bd_id, attr_key, val_str, 1)
                                         updated += 1
                                 else:
-                                    db.upsert_attr("ip", ip_id, attr_key, val_str, 0)
-                                    updated += 1
-
-                    # Overwrite mode: clear DB attrs not present in the import
-                    if mode == "overwrite":
-                        existing = db.get_attrs("ip", ip_id)
-                        for k, v in existing.items():
-                            if k not in import_keys and (v or "").strip():
-                                db.delete_attr("ip", ip_id, k)
-                                updated += 1
-
-                except Exception as e:
-                    errors.append(f"VLAN {vlan_num} row {row_idx} IP {ip_addr}: {e}")
-
-            else:
-                # No IP address = subnet-level attribute row
-                for col_idx, attr_key in attr_cols:
-                    val = sheet.cell(row_idx, col_idx).value
-                    if val:
-                        val_str = str(val).strip()
-                        # Backwards compat: strip old [Subnet: ...] wrapper
-                        if val_str.startswith("[Subnet:") and val_str.endswith("]"):
-                            val_str = val_str[len("[Subnet:"):].rstrip("]").strip()
-                        if not val_str:
-                            continue
-
-                        if mode in ("overwrite", "prefer_import"):
-                            db.upsert_attr("bd", bd_id, attr_key, val_str, 1)
-                            updated += 1
-                        elif mode == "prefer_db":
-                            existing = db.get_attrs("bd", bd_id)
-                            if attr_key not in existing or not existing[attr_key]:
-                                db.upsert_attr("bd", bd_id, attr_key, val_str, 1)
-                                updated += 1
-                        elif mode == "interactive":
-                            existing = db.get_attrs("bd", bd_id)
-                            if attr_key in existing and existing[attr_key] and existing[attr_key] != val_str:
-                                choice = dialog_yes_no(
-                                    stdscr,
-                                    "Import conflict",
-                                    "Subnet attribute conflict",
-                                    [
-                                        f"Subnet: {subnet_name}",
-                                        f"Key: {attr_key}",
-                                        f"DB value: {existing[attr_key]}",
-                                        f"Import value: {val_str}",
-                                        "",
-                                        "Use imported value?"
-                                    ],
-                                    default_yes=False,
-                                    db_name=db_name
-                                )
-                                if choice:
                                     db.upsert_attr("bd", bd_id, attr_key, val_str, 1)
                                     updated += 1
-                            else:
-                                db.upsert_attr("bd", bd_id, attr_key, val_str, 1)
-                                updated += 1
 
-            processed_rows += 1
-            if processed_rows % 25 == 0 or processed_rows == total_rows:
-                show_progress(f"VLAN {vlan_num}")
+                processed_rows += 1
+                if processed_rows % 25 == 0 or processed_rows == total_rows:
+                    show_progress(f"VLAN {vlan_num}")
 
-    # --- Import Owned Subnets sheet ---
-    if "Owned_Subnets" in wb.sheetnames:
-        os_sheet = wb["Owned_Subnets"]
-        existing_owned = db.list_owned_subnets()
-        for row_idx in range(2, os_sheet.max_row + 1):
-            os_cidr = os_sheet.cell(row_idx, 1).value
-            os_label = os_sheet.cell(row_idx, 2).value or ""
-            if not os_cidr:
-                continue
-            os_cidr = str(os_cidr).strip()
-            os_label = str(os_label).strip()
-            try:
-                # Check if this exact CIDR already exists
-                already_exists = any(o["cidr"] == str(ipaddress.ip_network(os_cidr, strict=False)) for o in existing_owned)
-                if not already_exists:
-                    db.create_owned_subnet(os_cidr, os_label)
-                    existing_owned = db.list_owned_subnets()  # Refresh after insert
-                    added += 1
-                else:
-                    # Update label if different
-                    for o in existing_owned:
-                        if o["cidr"] == str(ipaddress.ip_network(os_cidr, strict=False)):
-                            if o["label"] != os_label:
-                                db.update_owned_subnet_label(o["id"], os_label)
-                                updated += 1
-                            break
-            except (ValueError, Exception) as e:
-                errors.append(f"Owned subnet {os_cidr}: {e}")
+        # --- Import Owned Subnets sheet ---
+        if "Owned_Subnets" in wb.sheetnames:
+            os_sheet = wb["Owned_Subnets"]
+            existing_owned = db.list_owned_subnets()
+            for row_idx in range(2, os_sheet.max_row + 1):
+                os_cidr = os_sheet.cell(row_idx, 1).value
+                os_label = os_sheet.cell(row_idx, 2).value or ""
+                if not os_cidr:
+                    continue
+                os_cidr = str(os_cidr).strip()
+                os_label = str(os_label).strip()
+                try:
+                    # Check if this exact CIDR already exists
+                    already_exists = any(o["cidr"] == str(ipaddress.ip_network(os_cidr, strict=False)) for o in existing_owned)
+                    if not already_exists:
+                        db.create_owned_subnet(os_cidr, os_label)
+                        existing_owned = db.list_owned_subnets()  # Refresh after insert
+                        added += 1
+                    else:
+                        # Update label if different
+                        for o in existing_owned:
+                            if o["cidr"] == str(ipaddress.ip_network(os_cidr, strict=False)):
+                                if o["label"] != os_label:
+                                    db.update_owned_subnet_label(o["id"], os_label)
+                                    updated += 1
+                                break
+                except (ValueError, Exception) as e:
+                    errors.append(f"Owned subnet {os_cidr}: {e}")
 
-    # Commit the batched transaction (or rollback on failure)
-    try:
-        db.con.commit()
-    except Exception:
-        db.con.rollback()
-        raise
-    finally:
-        db._in_transaction = False
-        db.invalidate_resolve_cache()
+
+    db.invalidate_resolve_cache()
 
     show_progress("Done")
     return added, updated, errors
