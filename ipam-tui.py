@@ -3779,13 +3779,6 @@ def screen_subnet_menu(
                 cust = vlan_attrs.get("Customer", "")
             if not loc:
                 loc = vlan_attrs.get("Location", "")
-        # Fall back to VLAN-level attrs if subnet has no Customer/Location
-        if not cust or not loc:
-            vlan_attrs = db.get_attrs("vlan", vlan["id"], include_defaults=False)
-            if not cust:
-                cust = vlan_attrs.get("Customer", "")
-            if not loc:
-                loc = vlan_attrs.get("Location", "")
 
         left.addnstr(2, 2, f"Subnet: {subnet['name']}", inner_w, cp(CP_NORMAL) | curses.A_BOLD)
         left.addnstr(3, 2, f"VLAN: {vlan['vlan_num']} {vlan['name']}", inner_w)
