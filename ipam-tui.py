@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # Config
 # =============================================================================
 
-VERSION = "0.9.12"
+VERSION = "0.9.13"
 APP_TITLE = "IPAM / VLAN Manager"
 MAX_ENUM_HOSTS = 4096  # guard rail for enumerating "unused" IPs in a subnet
 VLAN_SUBNET_KEYS = ["Customer", "Location", "Comment"]
@@ -188,6 +188,7 @@ class DB:
         self.con.execute("PRAGMA journal_mode=WAL")
         self._in_transaction = False
         self.current_user: Optional[User] = None
+        self.db_path: str = path
         self.db_name: str = ""
         self._resolve_cache: Optional[list] = None  # Cached parsed bd_ranges for resolve_for_ip
 
@@ -456,7 +457,7 @@ class DB:
 
         # Preserve current snapshots and audit_log tables
         preserved_snapshots = self.q("SELECT id, timestamp, db_state FROM snapshots")
-        preserved_audit = self.q("SELECT id, timestamp, action, description, snapshot_id FROM audit_log")
+        preserved_audit = self.q("SELECT id, timestamp, action, description, snapshot_id, logged_by FROM audit_log")
 
         # Close connection temporarily
         self.con.close()
@@ -477,7 +478,8 @@ class DB:
               timestamp TEXT NOT NULL,
               action TEXT NOT NULL,
               description TEXT NOT NULL,
-              snapshot_id INTEGER
+              snapshot_id INTEGER,
+              logged_by TEXT
             );
             CREATE TABLE IF NOT EXISTS snapshots (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -501,14 +503,14 @@ class DB:
             )
         for row in preserved_audit:
             restore_con.execute(
-                "INSERT OR REPLACE INTO audit_log(id, timestamp, action, description, snapshot_id) VALUES(?, ?, ?, ?, ?)",
-                (row["id"], row["timestamp"], row["action"], row["description"], row["snapshot_id"])
+                "INSERT OR REPLACE INTO audit_log(id, timestamp, action, description, snapshot_id, logged_by) VALUES(?, ?, ?, ?, ?, ?)",
+                (row["id"], row["timestamp"], row["action"], row["description"], row["snapshot_id"], row["logged_by"])
             )
 
         # Log the restore action
         restore_con.execute(
-            "INSERT INTO audit_log(timestamp, action, description, snapshot_id) VALUES(?, ?, ?, ?)",
-            (datetime.now().isoformat(), "restore_snapshot", f"Restored to snapshot {snapshot_id}", None)
+            "INSERT INTO audit_log(timestamp, action, description, snapshot_id, logged_by) VALUES(?, ?, ?, ?, ?)",
+            (datetime.now().isoformat(), "restore_snapshot", f"Restored to snapshot {snapshot_id}", None, self.current_user.username if self.current_user else None)
         )
 
         restore_con.commit()
@@ -4671,7 +4673,7 @@ def workflow_audit_log(stdscr, db: DB, db_name: str):
                 continue
 
             try:
-                db_path = sys.argv[1]
+                db_path = db.db_path
                 backup_file = db.restore_snapshot(entry["snapshot_id"], db_path)
                 dialog_message(
                     stdscr, bc, "Rollback Complete",
